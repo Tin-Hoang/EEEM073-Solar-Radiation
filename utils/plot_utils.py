@@ -82,20 +82,9 @@ def plot_time_series(data, location_idx=0, title=None, features=None, target_var
     if n_features == 1:
         axes = [axes]  # Make iterable if only one subplot
 
-    # Group features that require special handling
-    nighttime_features = ['nighttime_mask']
-    solar_angle_features = ['solar_zenith_angle', 'solar_azimuth_angle']
-    radiation_features = ['ghi', 'dni', 'dhi', 'clearsky_ghi', 'clearsky_dni', 'clearsky_dhi', 'clear_sky_ghi']
-    binary_features = ['cloud_fill_flag']
-
-    # Check for solar zenith angle to potentially display day/night shading
-    has_solar_zenith = 'solar_zenith_angle' in data
-    has_nighttime_mask = 'nighttime_mask' in data
-
-    # Process and plot each feature
     for i, feature in enumerate(available_features):
         # Get feature data for this location within the selected time range
-        feature_data = data[feature][time_slice, location_idx].copy()
+        feature_data = data[feature][time_slice, location_idx]
 
         # Check if shapes match
         if len(feature_data) != time_shape:
@@ -109,26 +98,13 @@ def plot_time_series(data, location_idx=0, title=None, features=None, target_var
                 print(f"Warning: Feature {feature} has fewer data points ({len(feature_data)}) than timestamps ({time_shape}). Skipping this feature.")
                 continue
 
-        # Special handling for solar zenith angle - might need different scaling
-        if feature in solar_angle_features:
-            # Print the data range and type
-            print(f"{feature} range: {np.min(feature_data)} to {np.max(feature_data)} (dtype: {feature_data.dtype})")
-
-            # Handle special case for solar angles when values are very small
-            if np.max(feature_data) < 10 and feature == 'solar_zenith_angle':
-                print(f"Warning: Solar zenith angle values very small - might be cosine values")
-                if np.all((feature_data >= -1.0) & (feature_data <= 1.0)):
-                    # Convert from cosine to angle in degrees
-                    feature_data = np.arccos(np.clip(feature_data, -1.0, 1.0)) * 180 / np.pi
-                    print(f"Converted to angles in degrees: {np.min(feature_data)} to {np.max(feature_data)}")
-
-        # Default scaling based on data type if not a special case handled above
-        elif feature_data.dtype in [np.uint8, np.uint16, np.int8, np.int16]:
+        # Convert data types and handle scaling for better visualization
+        if feature_data.dtype in [np.uint8, np.uint16, np.int8, np.int16]:
             # These are likely scaled values, convert to float for display
             if feature in ['air_temperature', 'dew_point']:
                 # These are often stored as °C * 100
                 feature_data = feature_data.astype(float) / 100.0
-            elif feature in radiation_features:
+            elif feature in ['ghi', 'dni', 'dhi', 'clearsky_ghi', 'clearsky_dni', 'clearsky_dhi']:
                 # Radiation values are often stored as W/m² * 10
                 feature_data = feature_data.astype(float) / 10.0
             elif feature in ['relative_humidity']:
@@ -139,51 +115,14 @@ def plot_time_series(data, location_idx=0, title=None, features=None, target_var
                 feature_data = feature_data.astype(float)
 
         # Plot the data
-        ax = axes[i]
-        line = ax.plot(selected_timestamps, feature_data, '-', label=feature)[0]
-
-        # Set y-axis label and title
-        ax.set_ylabel(feature)
+        axes[i].plot(selected_timestamps, feature_data, '-', label=feature)
+        axes[i].set_ylabel(feature)
         if i == 0:
-            ax.set_title(title or f'Time Series for Location {location_idx} (Steps {start_idx} to {end_idx-1})')
+            axes[i].set_title(title or f'Time Series for Location {location_idx} (Steps {start_idx} to {end_idx-1})')
+        axes[i].grid(True)
+        axes[i].legend()
 
-        # Add grid and legend
-        ax.grid(True)
-        ax.legend(loc='upper right')
-
-        # Special handling for binary features (like nighttime_mask)
-        if feature in nighttime_features or feature in binary_features:
-            ax.set_ylim(-0.1, 1.1)  # Add some padding for binary values
-
-        # For solar zenith angle, add a horizontal line at 90 degrees
-        if feature in solar_angle_features and feature == 'solar_zenith_angle':
-            ax.axhline(y=90, color='r', linestyle='--', label='90° Threshold')
-            ax.legend(loc='upper right')
-
-        # Add shaded regions for day/night transitions if this is a radiation feature and we have night info
-        if (feature in radiation_features or 'temperature' in feature) and (has_solar_zenith or has_nighttime_mask):
-            # Get the nighttime mask data
-            if has_nighttime_mask:
-                nighttime = data['nighttime_mask'][time_slice, location_idx]
-            elif has_solar_zenith:
-                solar_zenith = data['solar_zenith_angle'][time_slice, location_idx]
-                # Check if we need to scale the solar zenith angle
-                if solar_zenith.dtype in [np.int16, np.uint16] and np.max(solar_zenith) > 180:
-                    solar_zenith = solar_zenith.astype(float) / 100.0
-                # Create nighttime mask based on zenith angle
-                nighttime = (solar_zenith >= 90.0).astype(bool)
-
-            # Add shaded regions for nighttime
-            for t in range(len(nighttime)-1):
-                if nighttime[t]:
-                    ax.axvspan(selected_timestamps[t],
-                              selected_timestamps[t+1],
-                              alpha=0.2, color='gray')
-
-    # Set the x-axis label for the bottom subplot
     axes[-1].set_xlabel('Time')
-
-    # Adjust layout
     plt.tight_layout()
 
     # Print location information

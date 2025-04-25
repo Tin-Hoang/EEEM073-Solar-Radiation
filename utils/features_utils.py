@@ -1,13 +1,15 @@
 import numpy as np
+from datetime import datetime, timedelta
 
 
-def compute_nighttime_mask(timestamps_dict, lats, lons, solar_zenith_angle=None):
+def compute_nighttime_mask(timestamps, lats, lons, solar_zenith_angle=None):
     """
     Compute nighttime mask using the correct local time for each site
     or directly from solar zenith angle if available.
 
     Args:
-        timestamps_dict: Dictionary of site_idx -> array of local timestamps
+        timestamps: Either a dictionary of {site_idx -> array of local timestamps}
+                   OR a single array of timestamps for all sites
         lats: Array of latitude values
         lons: Array of longitude values
         solar_zenith_angle: Optional pre-computed solar zenith angle values (time, sites)
@@ -17,7 +19,19 @@ def compute_nighttime_mask(timestamps_dict, lats, lons, solar_zenith_angle=None)
     Returns:
         nighttime_mask: Boolean mask indicating nighttime (True) or daytime (False)
     """
-    n_times = len(next(iter(timestamps_dict.values())))  # Get length from first entry
+    # Determine the format of timestamps and handle accordingly
+    if isinstance(timestamps, dict):
+        # Original format: dictionary of site_idx -> timestamps
+        timestamps_dict = timestamps
+        n_times = len(next(iter(timestamps_dict.values())))  # Get length from first entry
+    else:
+        # New format: single array of timestamps for all sites
+        n_times = len(timestamps)
+        # Create a timestamps dictionary for compatibility with original function
+        timestamps_dict = {}
+        for site_idx in range(len(lats)):
+            timestamps_dict[site_idx] = timestamps
+
     n_sites = len(lats)
     nighttime_mask = np.zeros((n_times, n_sites), dtype=np.float32)
 
@@ -117,13 +131,15 @@ def compute_nighttime_mask(timestamps_dict, lats, lons, solar_zenith_angle=None)
 
     return nighttime_mask
 
-def compute_clearsky_ghi(timestamps_dict, lats, lons, solar_zenith_angle=None):
+
+def compute_clearsky_ghi(timestamps, lats, lons, solar_zenith_angle=None):
     """
     Compute clear-sky GHI using the correct local time for each site
     or directly from solar zenith angle if available.
 
     Args:
-        timestamps_dict: Dictionary of site_idx -> array of local timestamps
+        timestamps: Either a dictionary of {site_idx -> array of local timestamps}
+                   OR a single array of timestamps for all sites
         lats: Array of latitude values
         lons: Array of longitude values
         solar_zenith_angle: Optional pre-computed solar zenith angle values (time, sites)
@@ -131,7 +147,19 @@ def compute_clearsky_ghi(timestamps_dict, lats, lons, solar_zenith_angle=None):
     Returns:
         clear_sky_ghi: Estimated clear sky GHI values
     """
-    n_times = len(next(iter(timestamps_dict.values())))  # Get length from first entry
+    # Determine the format of timestamps and handle accordingly
+    if isinstance(timestamps, dict):
+        # Original format: dictionary of site_idx -> timestamps
+        timestamps_dict = timestamps
+        n_times = len(next(iter(timestamps_dict.values())))  # Get length from first entry
+    else:
+        # New format: single array of timestamps for all sites
+        n_times = len(timestamps)
+        # Create a timestamps dictionary for compatibility with original function
+        timestamps_dict = {}
+        for site_idx in range(len(lats)):
+            timestamps_dict[site_idx] = timestamps
+
     n_sites = len(lats)
     clear_sky_ghi = np.zeros((n_times, n_sites), dtype=np.float32)
     solar_constant = 1366.1  # W/m²
@@ -217,7 +245,8 @@ def compute_clearsky_ghi(timestamps_dict, lats, lons, solar_zenith_angle=None):
 
     return clear_sky_ghi
 
-def compute_physical_constraints(timestamps_dict, lats, lons, solar_zenith_angle=None):
+
+def compute_physical_constraints(timestamps, lats, lons, solar_zenith_angle=None):
     """
     Compute nighttime mask and clear-sky GHI using the correct local time for each site
     or directly from solar zenith angle if available.
@@ -226,7 +255,8 @@ def compute_physical_constraints(timestamps_dict, lats, lons, solar_zenith_angle
     Consider using compute_nighttime_mask and compute_clearsky_ghi separately.
 
     Args:
-        timestamps_dict: Dictionary of site_idx -> array of local timestamps
+        timestamps: Either a dictionary of {site_idx -> array of local timestamps}
+                   OR a single array of timestamps for all sites
         lats: Array of latitude values
         lons: Array of longitude values
         solar_zenith_angle: Optional pre-computed solar zenith angle values (time, sites)
@@ -238,9 +268,9 @@ def compute_physical_constraints(timestamps_dict, lats, lons, solar_zenith_angle
         clear_sky_ghi: Estimated clear sky GHI values
     """
     # Compute nighttime mask
-    nighttime_mask = compute_nighttime_mask(timestamps_dict, lats, lons, solar_zenith_angle)
+    nighttime_mask = compute_nighttime_mask(timestamps, lats, lons, solar_zenith_angle)
 
     # Compute clear sky GHI
-    clear_sky_ghi = compute_clearsky_ghi(timestamps_dict, lats, lons, solar_zenith_angle)
+    clear_sky_ghi = compute_clearsky_ghi(timestamps, lats, lons, solar_zenith_angle)
 
     return nighttime_mask, clear_sky_ghi

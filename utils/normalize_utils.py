@@ -1,5 +1,7 @@
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 import numpy as np
+import os
+from utils.data_persistence import save_scalers, load_scalers
 
 
 def create_time_features(timestamps):
@@ -35,84 +37,108 @@ def create_time_features(timestamps):
     ])
 
 
-def normalize_data(train_data, val_data, test_data, selected_features, target_variable):
+def normalize_data(data, selected_features, target_variable, scalers=None, fit_scalers=True):
     """
-    Normalize data using appropriate scaling for each feature
+    Normalize a single dataset using appropriate scaling for each feature
+
+    This function can be called separately for train/val/test with the same scalers
 
     Args:
-        train_data: Training data dictionary
-        val_data: Validation data dictionary
-        test_data: Test data dictionary
+        data: Dictionary of data to normalize
         selected_features: List of features to normalize
         target_variable: Target variable to predict
+        scalers: Optional dictionary of pre-fitted scalers to use (for val/test sets)
+        fit_scalers: Whether to fit new scalers (True for training, False for val/test)
 
     Returns:
-        norm_train_data: Normalized training data
-        norm_val_data: Normalized validation data
-        norm_test_data: Normalized test data
-        scalers: Dictionary of fitted scalers
+        normalized_data: Dictionary of normalized data
+        scalers: Dictionary of fitted scalers for reuse
     """
-    scalers = {}
+    # Initialize result dictionary and scalers if needed
+    normalized_data = {}
+    if scalers is None and fit_scalers:
+        scalers = {}
+    elif scalers is None and not fit_scalers:
+        raise ValueError("Must provide scalers when fit_scalers=False")
 
-    # Initialize normalized data dictionaries
-    norm_train_data = {}
-    norm_val_data = {}
-    norm_test_data = {}
+    # Process time features - these don't need scaling
+    if 'timestamps' in data:
+        normalized_data['time_features'] = create_time_features(data['timestamps'])
+    elif 'time_features' in data:
+        # If already processed, just copy
+        normalized_data['time_features'] = data['time_features']
 
-    # Add time features
-    norm_train_data['time_features'] = create_time_features(train_data['timestamps'])
-    norm_val_data['time_features'] = create_time_features(val_data['timestamps'])
-    norm_test_data['time_features'] = create_time_features(test_data['timestamps'])
+    # Process coordinates
+    if 'latitude' in data and 'longitude' in data:
+        # We need to scale coordinates
+        coords = np.column_stack([data['latitude'], data['longitude']])
 
-    # Location data - normalize latitude and longitude
-    coord_scaler = MinMaxScaler()
-    train_coords = np.column_stack([train_data['latitude'], train_data['longitude']])
-    coord_scaler.fit(train_coords)
+        if fit_scalers:
+            # Create and fit scaler for coordinates
+            coord_scaler = MinMaxScaler()
+            coord_scaler.fit(coords)
+            scalers['coord_scaler'] = coord_scaler
+        else:
+            # Use existing scaler
+            coord_scaler = scalers['coord_scaler']
 
-    norm_train_data['coordinates'] = coord_scaler.transform(train_coords)
-    val_coords = np.column_stack([val_data['latitude'], val_data['longitude']])
-    norm_val_data['coordinates'] = coord_scaler.transform(val_coords)
-    test_coords = np.column_stack([test_data['latitude'], test_data['longitude']])
-    norm_test_data['coordinates'] = coord_scaler.transform(test_coords)
+        # Transform coordinates
+        normalized_data['coordinates'] = coord_scaler.transform(coords)
 
-    scalers['coord_scaler'] = coord_scaler
+    elif 'coordinates' in data:
+        # If coordinates are already present, apply scaling
+        if fit_scalers:
+            coord_scaler = MinMaxScaler()
+            coord_scaler.fit(data['coordinates'])
+            scalers['coord_scaler'] = coord_scaler
+        else:
+            coord_scaler = scalers['coord_scaler']
 
-    # Process elevation as a separate feature
-    elev_scaler = StandardScaler()
-    train_elev = train_data['elevation'].reshape(-1, 1)
-    elev_scaler.fit(train_elev)
+        normalized_data['coordinates'] = coord_scaler.transform(data['coordinates'])
 
-    norm_train_data['elevation'] = elev_scaler.transform(train_elev).reshape(train_data['elevation'].shape)
-    norm_val_data['elevation'] = elev_scaler.transform(val_data['elevation'].reshape(-1, 1)).reshape(val_data['elevation'].shape)
-    norm_test_data['elevation'] = elev_scaler.transform(test_data['elevation'].reshape(-1, 1)).reshape(test_data['elevation'].shape)
+    # Process elevation
+    if 'elevation' in data:
+        if fit_scalers:
+            elev_scaler = StandardScaler()
+            elev_data = data['elevation'].reshape(-1, 1)
+            elev_scaler.fit(elev_data)
+            scalers['elev_scaler'] = elev_scaler
+        else:
+            elev_scaler = scalers['elev_scaler']
 
-    scalers['elev_scaler'] = elev_scaler
+        # Transform elevation and reshape back to original shape
+        elev_data = data['elevation'].reshape(-1, 1)
+        normalized_data['elevation'] = elev_scaler.transform(elev_data).reshape(data['elevation'].shape)
 
-    # Nighttime mask doesn't need normalization
-    norm_train_data['nighttime_mask'] = train_data['nighttime_mask']
-    norm_val_data['nighttime_mask'] = val_data['nighttime_mask']
-    norm_test_data['nighttime_mask'] = test_data['nighttime_mask']
+    # Copy nighttime mask without normalization
+    if 'nighttime_mask' in data:
+        normalized_data['nighttime_mask'] = data['nighttime_mask']
 
-    # Process all selected features
-    for feature in selected_features + [target_variable]:
-        if feature not in train_data:
-            print(f"Warning: Feature {feature} not found in training data")
+    # Process all selected features and target variable
+    all_features = list(selected_features)
+    if target_variable not in all_features:
+        all_features.append(target_variable)
+
+    for feature in all_features:
+        if feature not in data:
+            print(f"Warning: Feature {feature} not found in data")
             continue
 
-        # Create and fit scaler for the feature (data is already scaled in data_loading_utils)
-        feature_scaler = MinMaxScaler()
-        reshaped_data = train_data[feature].reshape(-1, 1)
-        feature_scaler.fit(reshaped_data)
+        # Create or use existing scaler
+        if fit_scalers:
+            feature_scaler = MinMaxScaler()
+            reshaped_data = data[feature].reshape(-1, 1)
+            feature_scaler.fit(reshaped_data)
+            scalers[f'{feature}_scaler'] = feature_scaler
+        else:
+            feature_scaler = scalers[f'{feature}_scaler']
 
         # Transform and reshape data
-        norm_train_data[feature] = feature_scaler.transform(train_data[feature].reshape(-1, 1)).reshape(train_data[feature].shape)
-        norm_val_data[feature] = feature_scaler.transform(val_data[feature].reshape(-1, 1)).reshape(val_data[feature].shape)
-        norm_test_data[feature] = feature_scaler.transform(test_data[feature].reshape(-1, 1)).reshape(test_data[feature].shape)
+        normalized_data[feature] = feature_scaler.transform(
+            data[feature].reshape(-1, 1)
+        ).reshape(data[feature].shape)
 
-        # Store scaler
-        scalers[f'{feature}_scaler'] = feature_scaler
-
-    return norm_train_data, norm_val_data, norm_test_data, scalers
+    return normalized_data, scalers
 
 
 def create_sequences(data, lookback=24, selected_features=None, target_variable=None):
@@ -122,65 +148,136 @@ def create_sequences(data, lookback=24, selected_features=None, target_variable=
     Args:
         data: Dictionary of normalized data
         lookback: Number of timesteps to look back
+        selected_features: List of feature names to use
+        target_variable: Target variable to predict
 
     Returns:
-        seq_data: Dictionary of sequence arrays
+        seq_data: Dictionary with time series data in original structure
         seq_targets: Target GHI values
-        seq_metadata: Dictionary of metadata for each sequence
     """
-    # Initialize lists to store sequence data
-    seq_features = []
-    seq_coords = []
-    seq_time = []
-    seq_targets = []
-    seq_nighttime = []
-    seq_clear_sky = []
-    seq_elevation = []
-
     # Determine number of locations
     if 'coordinates' in data:
         n_locations = data['coordinates'].shape[0]
     else:
         n_locations = data[selected_features[0]].shape[1]
 
-    # For each location, create sequences
-    for loc in range(n_locations):
-        # Prepare feature array - combine all selected features
-        feature_arrays = []
-        for feature in selected_features:
-            if feature in data:
-                feature_arrays.append(data[feature][:, loc].reshape(-1, 1))
+    # Determine number of timesteps
+    n_timesteps = data[selected_features[0]].shape[0]
 
-        # Stack features along the feature dimension
-        if feature_arrays:
-            features = np.hstack(feature_arrays)
+    # Determine effective number of timesteps after sequence creation
+    effective_timesteps = n_timesteps - lookback
 
-            # Extract target and metadata
-            ghi = data[target_variable][:, loc]
-            coord = data['coordinates'][loc]
-            time_feat = data['time_features']
-            nighttime_mask = data['nighttime_mask'][:, loc]
-            clear_sky = data['clearsky_ghi'][:, loc]
-            elevation = data['elevation'][loc]
+    # Create targets array with original shape (keeping the time dimension)
+    seq_targets = data[target_variable][lookback:, :]
 
-            # Create sequences
-            for i in range(len(features) - lookback):
-                seq_features.append(features[i:i+lookback])
-                seq_time.append(time_feat[i:i+lookback])
-                seq_coords.append(np.tile(coord, (lookback, 1)))
-                seq_elevation.append(np.tile(elevation, lookback))
-                seq_targets.append(ghi[i+lookback])
-                seq_nighttime.append(nighttime_mask[i+lookback])
-                seq_clear_sky.append(clear_sky[i+lookback])
+    # Initialize seq_data with original data structure
+    seq_data = {}
 
-    # Convert lists to arrays
-    seq_data = {
-        'features': np.array(seq_features),
-        'time': np.array(seq_time),
-        'coordinates': np.array(seq_coords),
-        'elevation': np.array(seq_elevation),
-        'nighttime_mask': np.array(seq_nighttime),
-        'clearsky_ghi': np.array(seq_clear_sky)
-    }
+    # Copy time features directly (shape will be n_timesteps-lookback, n_time_features)
+    if 'time_features' in data:
+        seq_data['time_features'] = data['time_features'][lookback:, :]
 
-    return seq_data, np.array(seq_targets)
+    # Copy coordinates directly (shape will be n_locations, 2)
+    if 'coordinates' in data:
+        seq_data['coordinates'] = data['coordinates']
+
+    # Copy elevation directly (shape will be n_locations)
+    if 'elevation' in data:
+        seq_data['elevation'] = data['elevation']
+
+    # Copy all time series features with shape (time, locations)
+    for feature in selected_features:
+        if feature in data and feature not in ['time_features', 'coordinates', 'elevation']:
+            # Keep the original structure but shift by lookback
+            seq_data[feature] = data[feature][lookback:, :]
+
+    # Copy nighttime_mask and clearsky_ghi if present
+    if 'nighttime_mask' in data:
+        seq_data['nighttime_mask'] = data['nighttime_mask'][lookback:, :]
+
+    if 'clearsky_ghi' in data:
+        seq_data['clearsky_ghi'] = data['clearsky_ghi'][lookback:, :]
+
+    # Instead of creating 3D sequences, we keep the original 2D structure
+    # This works better with the TimeSeriesDataset which handles the reshaping
+
+    print(f"Created sequences with shapes:")
+    for key, value in seq_data.items():
+        if isinstance(value, np.ndarray):
+            print(f"  - {key}: {value.shape}")
+    print(f"  - targets: {seq_targets.shape}")
+
+    return seq_data, seq_targets
+
+
+def apply_scalers(data, scalers, selected_features=None, target_variable=None, inverse=False):
+    """
+    Apply scalers to transform or inverse transform features.
+
+    Args:
+        data: Dictionary of data to transform or raw numpy arrays
+        scalers: Dictionary of scalers
+        selected_features: List of features to transform (if None, use all in scalers)
+        target_variable: Target variable name
+        inverse: If True, inverse transform data; if False, transform data
+
+    Returns:
+        transformed_data: Dictionary of transformed data
+    """
+    transformed_data = {}
+
+    # If selected_features is None, extract feature names from scalers
+    if selected_features is None:
+        selected_features = []
+        for key in scalers.keys():
+            if key.endswith('_scaler') and not key.startswith('coord') and not key.startswith('elev'):
+                feature = key[:-7]  # Remove '_scaler' suffix
+                if feature != target_variable:
+                    selected_features.append(feature)
+
+    # Include target variable if provided
+    all_features = list(selected_features)
+    if target_variable is not None and target_variable not in all_features:
+        all_features.append(target_variable)
+
+    # Process coordinates if available
+    if 'coordinates' in data and 'coord_scaler' in scalers:
+        if inverse:
+            transformed_data['coordinates'] = scalers['coord_scaler'].inverse_transform(data['coordinates'])
+        else:
+            transformed_data['coordinates'] = scalers['coord_scaler'].transform(data['coordinates'])
+
+    # Process elevation if available
+    if 'elevation' in data and 'elev_scaler' in scalers:
+        elev_data = data['elevation'].reshape(-1, 1)
+        if inverse:
+            transformed_data['elevation'] = scalers['elev_scaler'].inverse_transform(elev_data).reshape(data['elevation'].shape)
+        else:
+            transformed_data['elevation'] = scalers['elev_scaler'].transform(elev_data).reshape(data['elevation'].shape)
+
+    # Process time features (pass through without scaling)
+    if 'time_features' in data:
+        transformed_data['time_features'] = data['time_features']
+
+    # Process nighttime mask (pass through without scaling)
+    if 'nighttime_mask' in data:
+        transformed_data['nighttime_mask'] = data['nighttime_mask']
+
+    # Process all features
+    for feature in all_features:
+        if feature in data and f'{feature}_scaler' in scalers:
+            scaler = scalers[f'{feature}_scaler']
+            # Reshape data to 2D for scaler
+            original_shape = data[feature].shape
+            reshaped_data = data[feature].reshape(-1, 1)
+
+            # Transform or inverse transform
+            if inverse:
+                transformed = scaler.inverse_transform(reshaped_data)
+            else:
+                transformed = scaler.transform(reshaped_data)
+
+            # Reshape back to original shape
+            transformed_data[feature] = transformed.reshape(original_shape)
+
+    return transformed_data
