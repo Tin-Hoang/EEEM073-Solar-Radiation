@@ -7,16 +7,16 @@ import wandb
 import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import matplotlib.pyplot as plt
-import seaborn as sns
 
-from utils.wandb_utils import track_experiment
+from utils.wandb_utils import track_experiment, is_wandb_enabled
+from utils.model_utils import get_model_summary
 
-USE_WANDB = True
+# Device configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @track_experiment
-def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, patience=10, lr=0.001):
+def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, patience=10, lr=0.001, debug_mode=False):
     """
     Train a model and validate it
 
@@ -28,6 +28,7 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
         epochs: Maximum number of epochs
         patience: Early stopping patience
         lr: Learning rate
+        debug_mode: Whether to run as debug mode (only run 10 batches per epoch)
 
     Returns:
         history: Dictionary of training history
@@ -45,16 +46,29 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
     best_model_state = None
 
     # Log model architecture if using wandb
-    if USE_WANDB:
-        wandb.watch(model, log="all", log_freq=100)
+    if is_wandb_enabled():
+        # wandb.watch(model, log="all", log_freq=2)
+        try:
+            model_summary = get_model_summary(model)
+        except:
+            model_summary = repr(model)
 
-    for epoch in tqdm(range(epochs), desc=f"Training {model_name}"):
+        # Log model architecture
+        wandb.log({
+            "model_architecture": model_summary
+        })
+
+    # Instead of wrapping epochs in tqdm, we'll manually print epoch progress
+    for epoch in range(epochs):
+        print(f"Epoch {epoch+1}/{epochs}")
         # Training phase
         model.train()
         train_loss = 0.0
         train_mae = 0.0
-
-        for batch in train_loader:
+        debug_counter = 0
+        # Use tqdm for batch-level progress
+        train_loop = tqdm(train_loader, desc=f"Training {model_name}", leave=False)
+        for batch in train_loop:
             # Check for required fields
             if 'temporal_features' not in batch or 'static_features' not in batch or 'target' not in batch:
                 raise ValueError("Batch missing required fields: 'temporal_features', 'static_features', or 'target'")
@@ -84,8 +98,18 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
             loss.backward()
             optimizer.step()
 
-            train_loss += loss.item() * temporal_features.size(0)
+            batch_loss = loss.item()
+            batch_mae = F.l1_loss(output, target, reduction='mean').item()
+
+            train_loss += batch_loss * temporal_features.size(0)
             train_mae += F.l1_loss(output, target, reduction='sum').item()
+
+            # Update the progress bar with current batch metrics
+            train_loop.set_postfix(loss=batch_loss, mae=batch_mae)
+
+            debug_counter += 1
+            if debug_mode and debug_counter > 10:
+                break
 
         train_loss /= len(train_loader.dataset)
         train_mae /= len(train_loader.dataset)
@@ -96,7 +120,10 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
         val_mae = 0.0
 
         with torch.no_grad():
-            for batch in val_loader:
+            # Use tqdm for validation batches as well
+            val_loop = tqdm(val_loader, desc=f"Validating {model_name}", leave=False)
+            debug_counter = 0
+            for batch in val_loop:
                 # Check for required fields
                 if 'temporal_features' not in batch or 'static_features' not in batch or 'target' not in batch:
                     raise ValueError("Batch missing required fields: 'temporal_features', 'static_features', or 'target'")
@@ -122,9 +149,18 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
                         output = output.view(*target.shape)
 
                 loss = criterion(output, target)
+                batch_loss = loss.item()
+                batch_mae = F.l1_loss(output, target, reduction='mean').item()
 
                 val_loss += loss.item() * temporal_features.size(0)
                 val_mae += F.l1_loss(output, target, reduction='sum').item()
+
+                # Update validation progress bar
+                val_loop.set_postfix(loss=batch_loss, mae=batch_mae)
+
+                debug_counter += 1
+                if debug_mode and debug_counter > 10:
+                    break
 
         val_loss /= len(val_loader.dataset)
         val_mae /= len(val_loader.dataset)
@@ -139,16 +175,16 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
         history['val_mae'].append(val_mae)
 
         # Log metrics to wandb
-        if USE_WANDB:
+        if is_wandb_enabled():
             wandb.log({
-                'epoch': epoch,
-                'train_loss': train_loss,
-                'val_loss': val_loss,
-                'train_mae': train_mae,
-                'val_mae': val_mae,
-                'learning_rate': optimizer.param_groups[0]['lr']
+                'train/epoch': epoch,
+                'train/loss': train_loss,
+                'train/mae': train_mae,
+                'train/learning_rate': optimizer.param_groups[0]['lr'],
+                'val/epoch': epoch,
+                'val/loss': val_loss,
+                'val/mae': val_mae,
             })
-
         print(f"Epoch {epoch+1}/{epochs} | Train Loss: {train_loss:.4f}, Train MAE: {train_mae:.4f} | "
               f"Val Loss: {val_loss:.4f}, Val MAE: {val_mae:.4f} | "
               f"LR: {optimizer.param_groups[0]['lr']:.6f}")
@@ -160,7 +196,7 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
             best_model_state = model.state_dict().copy()
 
             # Save best model checkpoint in wandb
-            if USE_WANDB:
+            if is_wandb_enabled():
                 model_path = f"{model_name}_best.pt"
                 torch.save(model.state_dict(), model_path)
                 wandb.save(model_path)
@@ -171,6 +207,7 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
                 break
 
     # Load best model
+    print("LOADING BEST MODEL FROM TRAINING SESSION")
     model.load_state_dict(best_model_state)
     return history
 
@@ -211,14 +248,18 @@ def train_pinn_model(model, train_loader, val_loader, model_name="PINN-Model", e
     if USE_WANDB:
         wandb.watch(model, log="all", log_freq=100)
 
-    for epoch in tqdm(range(epochs), desc=f"Training {model_name}"):
+    # Instead of wrapping epochs in tqdm, we'll manually print epoch progress
+    for epoch in range(epochs):
+        print(f"Epoch {epoch+1}/{epochs}")
         # Training phase
         model.train()
         train_loss = 0.0
         train_mae = 0.0
         train_loss_components = {'mse': 0.0, 'night': 0.0, 'neg': 0.0, 'clear': 0.0}
 
-        for batch in train_loader:
+        # Use tqdm for batch-level progress
+        train_loop = tqdm(train_loader, desc=f"Training {model_name}", leave=False)
+        for batch in train_loop:
             temporal_features = batch['temporal_features'].to(device)
             static_features = batch['static_features'].to(device)
             target = batch['target'].to(device)
@@ -295,12 +336,23 @@ def train_pinn_model(model, train_loader, val_loader, model_name="PINN-Model", e
 
             # Track loss components
             batch_size = temporal_features.size(0)
+            batch_total_loss = total_loss.item()
+            batch_mae = F.l1_loss(output, target, reduction='mean').item()
+
             train_loss += total_loss.item() * batch_size
             train_mae += F.l1_loss(output, target, reduction='sum').item()
             train_loss_components['mse'] += mse_loss.item() * batch_size
             train_loss_components['night'] += night_loss.item() * batch_size
             train_loss_components['neg'] += neg_loss.item() * batch_size
             train_loss_components['clear'] += clear_loss.item() * batch_size
+
+            # Update progress bar with current batch metrics
+            train_loop.set_postfix(
+                loss=batch_total_loss,
+                mae=batch_mae,
+                mse=mse_loss.item(),
+                night=night_loss.item() if has_nighttime else 0
+            )
 
         # Normalize losses
         train_loss /= len(train_loader.dataset)
@@ -315,7 +367,9 @@ def train_pinn_model(model, train_loader, val_loader, model_name="PINN-Model", e
         val_loss_components = {'mse': 0.0, 'night': 0.0, 'neg': 0.0, 'clear': 0.0}
 
         with torch.no_grad():
-            for batch in val_loader:
+            # Use tqdm for validation batches
+            val_loop = tqdm(val_loader, desc=f"Validating {model_name}", leave=False)
+            for batch in val_loop:
                 temporal_features = batch['temporal_features'].to(device)
                 static_features = batch['static_features'].to(device)
                 target = batch['target'].to(device)
@@ -388,12 +442,23 @@ def train_pinn_model(model, train_loader, val_loader, model_name="PINN-Model", e
 
                 # Track loss components
                 batch_size = temporal_features.size(0)
+                batch_total_loss = total_loss.item()
+                batch_mae = F.l1_loss(output, target, reduction='mean').item()
+
                 val_loss += total_loss.item() * batch_size
                 val_mae += F.l1_loss(output, target, reduction='sum').item()
                 val_loss_components['mse'] += mse_loss.item() * batch_size
                 val_loss_components['night'] += night_loss.item() * batch_size
                 val_loss_components['neg'] += neg_loss.item() * batch_size
                 val_loss_components['clear'] += clear_loss.item() * batch_size
+
+                # Update validation progress bar
+                val_loop.set_postfix(
+                    loss=batch_total_loss,
+                    mae=batch_mae,
+                    mse=mse_loss.item(),
+                    night=night_loss.item() if has_nighttime else 0
+                )
 
         # Normalize validation metrics
         val_loss /= len(val_loader.dataset)
@@ -460,14 +525,14 @@ def train_pinn_model(model, train_loader, val_loader, model_name="PINN-Model", e
 
 def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wandb=True):
     """
-    Evaluate model performance
+    Evaluate a model on a dataset and compute metrics.
 
     Args:
         model: PyTorch model
         data_loader: Data loader for evaluation
-        target_scaler: Scaler used for the target variable
+        target_scaler: Scaler for the target variable
         model_name: Name of the model for logging
-        log_to_wandb: Whether to log results to wandb
+        log_to_wandb: Whether to log to wandb
 
     Returns:
         metrics: Dictionary of evaluation metrics
@@ -479,23 +544,23 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
     has_nighttime_data = False
 
     with torch.no_grad():
-        # Check if the first batch has nighttime data
+        debug_counter = 0
         for batch in data_loader:
-            has_nighttime_data = 'nighttime' in batch
-            break
+            # Check for required fields
+            if 'temporal_features' not in batch or 'static_features' not in batch or 'target' not in batch:
+                raise ValueError("Batch missing required fields: 'temporal_features', 'static_features', or 'target'")
 
-        for batch in data_loader:
             temporal_features = batch['temporal_features'].to(device)
             static_features = batch['static_features'].to(device)
             target = batch['target'].to(device)
 
             # Ensure target has the right shape for broadcasting
             if len(target.shape) == 1 and target.shape[0] > 1:
-                # If target is [batch_size], reshape to [batch_size, 1]
                 target = target.view(-1, 1)
 
-            # Handle nighttime data if present
-            if has_nighttime_data:
+            # Check if we have nighttime data
+            if 'nighttime' in batch:
+                has_nighttime_data = True
                 nighttime = batch['nighttime']
                 # Ensure nighttime has same shape as target
                 if nighttime.shape != target.cpu().shape:
@@ -519,6 +584,10 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
             all_outputs.append(output.cpu().numpy())
             all_targets.append(target.cpu().numpy())
             all_nighttime.append(nighttime.cpu().numpy())
+
+            debug_counter += 1
+            if debug_counter > 10:
+                break
 
     # Concatenate batches
     all_outputs = np.vstack(all_outputs)
@@ -579,21 +648,63 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
         print("  Nighttime metrics: Not available (no nighttime data)")
 
     # Log to wandb if enabled
-    if USE_WANDB and log_to_wandb:
-        # Log metrics
-        eval_prefix = 'val_' if 'Validation' in model_name else 'test_' if 'Test' in model_name else ''
-        wandb.log({
+    if log_to_wandb and is_wandb_enabled():
+        # Create a metrics table instead of logging as timeseries
+        eval_prefix = 'val/' if 'Validation' in model_name else 'test/' if 'Test' in model_name else ''
+
+        # Create a table with metrics
+        metrics_table = wandb.Table(
+            columns=["Metric", "Overall", "Daytime", "Nighttime"],
+            data=[
+                ["MSE", float(mse), float(day_mse), float(night_mse)],
+                ["RMSE", float(rmse), float(day_rmse), float(night_rmse)],
+                ["MAE", float(mae), float(day_mae), float(night_mae)],
+                ["R²", float(r2), float(day_r2), float(night_r2)]
+            ]
+        )
+
+        # Create a summary dictionary for key metrics
+        summary_metrics = {
             f"{eval_prefix}mse": mse,
             f"{eval_prefix}rmse": rmse,
             f"{eval_prefix}mae": mae,
             f"{eval_prefix}r2": r2,
-            f"{eval_prefix}day_mse": day_mse,
-            f"{eval_prefix}day_rmse": day_rmse,
-            f"{eval_prefix}day_mae": day_mae,
-            f"{eval_prefix}day_r2": day_r2,
-            f"{eval_prefix}night_mse": night_mse,
-            f"{eval_prefix}night_rmse": night_rmse,
-            f"{eval_prefix}night_mae": night_mae,
+        }
+
+        # Create a sample predictions table
+        sample_size = min(100, len(y_true_orig))
+        indices = np.random.choice(len(y_true_orig), sample_size, replace=False)
+
+        # Create the table with predictions data
+        pred_table = wandb.Table(
+            columns=["True GHI", "Predicted GHI", "Residual", "Is Nighttime", "Error %"]
+        )
+
+        for i in indices:
+            true_val = float(y_true_orig[i][0])
+            pred_val = float(y_pred_orig[i][0])
+            residual = true_val - pred_val
+            is_night = bool(all_nighttime[i][0] > 0.5)
+
+            # Calculate error percentage, handling division by zero
+            if abs(true_val) > 1e-6:  # Avoid division by near-zero
+                error_pct = (residual / true_val) * 100
+            else:
+                error_pct = float('nan')
+
+            pred_table.add_data(
+                true_val,
+                pred_val,
+                residual,
+                is_night,
+                error_pct
+            )
+
+        # Log both the tables and the summary metrics
+        wandb.log({
+            f"{eval_prefix}metrics_table": metrics_table,
+            f"{eval_prefix}predictions_sample": pred_table,
+            **summary_metrics
         })
 
         # Create and log visualization plots
@@ -601,19 +712,8 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
         wandb.log({f"{eval_prefix}evaluation_plot": wandb.Image(fig)})
         plt.close(fig)
 
-        # Log a sample of predictions
-        sample_size = min(100, len(y_true_orig))
-        indices = np.random.choice(len(y_true_orig), sample_size, replace=False)
-        pred_table = wandb.Table(columns=["True GHI", "Predicted GHI", "Is Nighttime"])
-        for i in indices:
-            pred_table.add_data(
-                float(y_true_orig[i][0]),
-                float(y_pred_orig[i][0]),
-                bool(all_nighttime[i][0] > 0.5)
-            )
-        wandb.log({f"{eval_prefix}predictions_sample": pred_table})
-
     return metrics
+
 
 def plot_training_history(history, model_name=""):
     """
@@ -623,7 +723,7 @@ def plot_training_history(history, model_name=""):
         history: Dictionary of training history
         model_name: Name of the model for the plot title
     """
-    plt.figure(figsize=(12, 5))
+    fig = plt.figure(figsize=(12, 5))
 
     plt.subplot(1, 2, 1)
     plt.plot(history['train_loss'], label='Train')
@@ -645,6 +745,8 @@ def plot_training_history(history, model_name=""):
 
     plt.tight_layout()
     plt.show()
+    return fig
+
 
 def create_evaluation_plots(metrics, model_name=''):
     """
@@ -771,3 +873,4 @@ def plot_predictions(metrics, model_name=''):
     fig = create_evaluation_plots(metrics, model_name)
     plt.show()
     plt.close(fig)
+    return fig

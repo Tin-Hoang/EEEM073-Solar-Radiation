@@ -13,16 +13,60 @@ from functools import wraps
 
 # Default settings
 USE_WANDB = False
+KEEP_RUN_OPEN = False
 WANDB_USERNAME = "tin-hoang"
 WANDB_PROJECT = "EEEM073-Solar-Radiation"
 
-def setup_wandb(username=None, project=None):
+
+def is_wandb_enabled():
+    """
+    Check if wandb is enabled (with an active run)
+
+    Returns:
+        bool: True if wandb is enabled and has an active run
+    """
+    is_enabled = USE_WANDB and wandb.run is not None
+    return is_enabled
+
+
+def set_wandb_flag(value):
+    """
+    Set global USE_WANDB flag
+
+    Args:
+        value: Boolean value to set
+
+    Returns:
+        bool: The new value
+    """
+    global USE_WANDB
+    USE_WANDB = bool(value)
+    return USE_WANDB
+
+
+def set_keep_run_open(value):
+    """
+    Set global KEEP_RUN_OPEN flag
+
+    Args:
+        value: Boolean value to set
+
+    Returns:
+        bool: The new value
+    """
+    global KEEP_RUN_OPEN
+    KEEP_RUN_OPEN = bool(value)
+    return KEEP_RUN_OPEN
+
+
+def setup_wandb(username=None, project=None, force_enable=False):
     """
     Set up Weights & Biases tracking
 
     Args:
         username: Wandb username (default: None)
         project: Wandb project name (default: None)
+        force_enable: Force enable wandb even if already configured
 
     Returns:
         bool: Whether wandb is enabled
@@ -35,13 +79,74 @@ def setup_wandb(username=None, project=None):
 
     # Only enable wandb if both username and project are provided
     if wandb_username and wandb_project:
-        USE_WANDB = True
+        # Set the global flag
+        set_wandb_flag(True)
+
         print(f"Weights & Biases tracking enabled with username '{wandb_username}' and project '{wandb_project}'")
+        print(f"USE_WANDB flag is now: {USE_WANDB}")
+
+        # Initialize wandb if needed or forced
+        if force_enable or wandb.run is None:
+            try:
+                wandb.init(
+                    project=wandb_project,
+                    entity=wandb_username,
+                    name=f"Manual-Init-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
+                    config={
+                        "initialized_by": "setup_wandb",
+                        "force_enable": force_enable
+                    }
+                )
+                print(f"Successfully initialized wandb run: {wandb.run.name}")
+            except Exception as e:
+                print(f"Error initializing wandb: {e}")
     else:
-        USE_WANDB = False
+        # If parameters are missing, disable wandb
+        set_wandb_flag(False)
         print("Weights & Biases tracking disabled. Provide both username and project to enable.")
 
     return USE_WANDB
+
+
+def initialize_wandb(model_name="Model", **config_params):
+    """
+    Initialize a new wandb run if needed
+
+    Args:
+        model_name: Name of the model for the run name
+        **config_params: Additional configuration parameters
+
+    Returns:
+        bool: Whether initialization was successful
+    """
+    global USE_WANDB, WANDB_USERNAME, WANDB_PROJECT
+
+    if not USE_WANDB:
+        print("WARNING: initialize_wandb called but USE_WANDB is False, will not initialize")
+        return False
+
+    # Don't initialize if we already have a run
+    if wandb.run is not None:
+        print(f"wandb already initialized with run name: {wandb.run.name}")
+        return True
+
+    # Create a unique run name
+    run_name = f"{model_name}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+    try:
+        # Initialize wandb
+        wandb.init(
+            project=WANDB_PROJECT,
+            entity=WANDB_USERNAME,
+            name=run_name,
+            config=config_params
+        )
+        print(f"Successfully initialized wandb run: {wandb.run.name}")
+        return True
+    except Exception as e:
+        print(f"Error initializing wandb: {e}")
+        return False
+
 
 def track_experiment(func):
     """
@@ -49,18 +154,21 @@ def track_experiment(func):
 
     This decorator wraps training functions to automatically log metrics to wandb
     when wandb tracking is enabled.
+
+    The decorated function accepts an additional keyword parameter:
+    - keep_run_open (bool): If True, don't close the wandb run after the function completes
     """
     @wraps(func)
     def wrapper(*args, **kwargs):
         # Extract model name if available
         model_name = kwargs.get('model_name', 'Model')
 
+        # Print debug info
+        print(f"track_experiment: USE_WANDB={USE_WANDB}, wandb.run={wandb.run}, keep_run_open={KEEP_RUN_OPEN}")
+
         # Start wandb run if tracking is enabled
         if USE_WANDB:
-            # Create a unique run name
-            run_name = f"{model_name}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
-
-            # Get config parameters from kwargs
+            # Create config parameters from kwargs
             config = {
                 'model_name': model_name,
                 'epochs': kwargs.get('epochs', 50),
@@ -76,19 +184,37 @@ def track_experiment(func):
                     'lambda_clear': kwargs.get('lambda_clear'),
                 })
 
-            # Initialize wandb
-            wandb.init(
-                project=WANDB_PROJECT,
-                entity=WANDB_USERNAME,
-                name=run_name,
-                config=config
-            )
+            # Create the run if it doesn't exist
+            if wandb.run is None:
+                print(f"Creating new wandb run for {model_name}")
+
+                # Create a unique run name
+                run_name = f"{model_name}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+                # Initialize wandb
+                wandb.init(
+                    project=WANDB_PROJECT,
+                    entity=WANDB_USERNAME,
+                    name=run_name,
+                    config=config
+                )
+
+                # Flag to indicate this wrapper created the run
+                wrapper_created_run = True
+            else:
+                print(f"Using existing wandb run: {wandb.run.name}")
+                wrapper_created_run = False
 
             # Run the original function
             history = func(*args, **kwargs)
 
-            # Close wandb run
-            wandb.finish()
+            # Close wandb run if we created it and keep_run_open is False
+            if wrapper_created_run and not KEEP_RUN_OPEN:
+                print(f"Finishing wandb run from track_experiment (keep_run_open={KEEP_RUN_OPEN})")
+                wandb.finish()
+            elif KEEP_RUN_OPEN:
+                print(f"Keeping wandb run open as requested (keep_run_open={KEEP_RUN_OPEN})")
+
             return history
         else:
             # Just run the function without wandb tracking
@@ -126,44 +252,6 @@ def plot_training_history(history, model_name=""):
 
     plt.tight_layout()
     plt.show()
-
-    # Log training history to wandb
-    if USE_WANDB:
-        # Create a dataframe of training metrics
-        history_df = pd.DataFrame({
-            'epoch': list(range(len(history['train_loss']))),
-            'train_loss': history['train_loss'],
-            'val_loss': history['val_loss'],
-            'train_mae': history['train_mae'],
-            'val_mae': history['val_mae']
-        })
-
-        # Start a new wandb run if not already active
-        if wandb.run is None:
-            wandb.init(
-                project=WANDB_PROJECT,
-                entity=WANDB_USERNAME,
-                name=f"{model_name}-History",
-                config={"model": model_name}
-            )
-
-        # Log as a table
-        wandb.log({f"{model_name}_history": wandb.Table(dataframe=history_df)})
-
-        # Capture and log the matplotlib figure
-        history_fig = plt.gcf()
-        wandb.log({f"{model_name}_history_plot": wandb.Image(history_fig)})
-
-        # Create custom interactive line charts
-        for metric in ['loss', 'mae']:
-            data = [[e, history[f'train_{metric}'][e], history[f'val_{metric}'][e]]
-                   for e in range(len(history[f'train_{metric}']))]
-            table = wandb.Table(columns=["epoch", f"train_{metric}", f"val_{metric}"], data=data)
-            wandb.log({f"{model_name}_{metric}_curve": table})
-
-        # If this function started a wandb run, finish it
-        if wandb.run.name == f"{model_name}-History":
-            wandb.finish()
 
 def create_evaluation_plots(metrics, model_name=''):
     """
