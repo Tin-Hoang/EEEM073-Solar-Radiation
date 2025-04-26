@@ -590,6 +590,21 @@ class TimeSeriesDataset(Dataset):
                         # Get single timestep
                         result[key] = self.tensors[key][time_idx, loc_idx]
 
+            # Add nighttime field
+            if 'nighttime_mask' in self.tensors:
+                if self.lookback > 0:
+                    result['nighttime'] = self.tensors['nighttime_mask'][window_start:time_idx, loc_idx]
+                else:
+                    result['nighttime'] = self.tensors['nighttime_mask'][time_idx, loc_idx]
+            elif 'ghi' in self.tensors:
+                # Infer from GHI value (GHI=0 means nighttime)
+                if self.lookback > 0:
+                    ghi_values = self.tensors['ghi'][window_start:time_idx, loc_idx]
+                    result['nighttime'] = (ghi_values == 0).float()
+                else:
+                    ghi_value = self.tensors['ghi'][time_idx, loc_idx]
+                    result['nighttime'] = torch.tensor(float(ghi_value == 0), dtype=self.dtype)
+
             return result
         else:
             # Lazy loading mode
@@ -644,6 +659,22 @@ class TimeSeriesDataset(Dataset):
                         feature_val = self._seq_data[key][time_idx, loc_idx]
 
                     result[key] = torch.tensor(feature_val, dtype=self.dtype)
+
+            # Add nighttime field
+            if 'nighttime_mask' in self._seq_data:
+                if self.lookback > 0:
+                    nighttime = self._seq_data['nighttime_mask'][window_start:time_idx, loc_idx]
+                else:
+                    nighttime = self._seq_data['nighttime_mask'][time_idx, loc_idx]
+                result['nighttime'] = torch.tensor(nighttime, dtype=self.dtype)
+            elif 'ghi' in self._seq_data:
+                # Infer from GHI value (GHI=0 means nighttime)
+                if self.lookback > 0:
+                    ghi_values = self._seq_data['ghi'][window_start:time_idx, loc_idx]
+                    result['nighttime'] = torch.tensor(ghi_values == 0, dtype=self.dtype)
+                else:
+                    ghi_value = self._seq_data['ghi'][time_idx, loc_idx]
+                    result['nighttime'] = torch.tensor(float(ghi_value == 0), dtype=self.dtype)
 
             return result
 
