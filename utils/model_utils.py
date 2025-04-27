@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
 import torch
-from torchinfo import summary
 
 
 def inverse_transform_predictions(y_pred, scaler):
@@ -121,52 +120,54 @@ def plot_predictions(y_true, y_pred, timestamps=None, horizon=None, sample_indic
     plt.tight_layout()
     return fig
 
-def get_model_summary(model, batch_size=16, seq_length=24, feature_dim=10, static_dim=5):
+def get_model_summary(model, temporal_shape, static_shape):
     """
     Generate a detailed summary of a PyTorch model using torchinfo.
 
     Args:
         model: PyTorch model
-        batch_size: Batch size for input shape
-        seq_length: Sequence length for temporal features
-        feature_dim: Number of features in temporal input
-        static_dim: Number of features in static input
+        temporal_shape: Shape of temporal features
+        static_shape: Shape of static features
 
     Returns:
         ModelStatistics object with model summary
     """
-    # Create dummy inputs with appropriate shapes
-    temporal_shape = (batch_size, seq_length, feature_dim)
-    static_shape = (batch_size, static_dim)
+    from torchinfo import summary
 
-    # Generate the summary
-    model_summary = summary(
-        model,
-        input_data=[
-            torch.zeros(temporal_shape),
-            torch.zeros(static_shape)
-        ],
-        col_names=["input_size", "output_size", "num_params", "trainable"],
-        col_width=20,
-        row_settings=["var_names"]
-    )
+    # Create dummy inputs with appropriate shapes
+    try:
+        # Generate the summary
+        model_summary = summary(
+            model,
+            input_data=[
+                torch.zeros(temporal_shape),
+                torch.zeros(static_shape)
+            ],
+            col_names=["input_size", "output_size", "num_params", "trainable"],
+            col_width=20,
+            row_settings=["var_names"]
+            )
+    except IndexError:
+        # Fallback to default summary if dimension input error
+        model_summary = summary(model)
+    except Exception as e:
+        print(f"Error generating model summary: {e}")
+        raise e
 
     return model_summary
 
-def print_model_info(model, batch_size=16, seq_length=24, feature_dim=10, static_dim=5):
+def print_model_info(model, temporal_shape, static_shape):
     """
     Print compact model information including parameter count and layer structure.
 
     Args:
         model: PyTorch model
-        batch_size: Batch size for input shape
-        seq_length: Sequence length for temporal features
-        feature_dim: Number of features in temporal input
-        static_dim: Number of features in static input
+        temporal_shape: Shape of temporal features
+        static_shape: Shape of static features
     """
     # For notebooks that can't install torchinfo, fall back to manual parameter counting
     try:
-        print(get_model_summary(model, batch_size, seq_length, feature_dim, static_dim))
+        print(get_model_summary(model, temporal_shape, static_shape))
     except:
         # Fallback if torchinfo is not available
         total_params = sum(p.numel() for p in model.parameters())
