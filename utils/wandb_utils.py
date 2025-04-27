@@ -168,12 +168,22 @@ def track_experiment(func):
 
         # Start wandb run if tracking is enabled
         if USE_WANDB:
+            train_loader = kwargs.get('train_loader', None)
+            batch_size = train_loader.batch_size if train_loader else "None"
+            lookback = train_loader.dataset.lookback if train_loader else "None"
+            target_field = train_loader.dataset.target_field if train_loader else "None"
+            selected_features = train_loader.dataset.selected_features if train_loader else "None"
+            
             # Create config parameters from kwargs
             config = {
                 'model_name': model_name,
                 'epochs': kwargs.get('epochs', 50),
                 'patience': kwargs.get('patience', 10),
                 'learning_rate': kwargs.get('lr', 0.001),
+                'batch_size': batch_size,
+                'lookback': lookback,
+                'target_field': target_field,
+                'selected_features': selected_features
             }
 
             # Add physics parameters if they exist

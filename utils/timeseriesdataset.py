@@ -7,8 +7,9 @@ import os
 
 class TimeSeriesDataset(Dataset):
     def __init__(self, preprocessed_data_path=None, seq_data=None, targets=None,
-                 lazy_loading=False, dtype=torch.float32, field_names=None,
-                 lookback=24, target_field='ghi'):
+                 lazy_loading=False, dtype=torch.float32, lookback=24,
+                 target_field='ghi', time_key='time_features', selected_features=None,
+                 include_target_history=True):
         """
         Dataset for time series forecasting with memory optimization and customizable field names.
 
@@ -21,24 +22,38 @@ class TimeSeriesDataset(Dataset):
             targets: Target values (used only if preprocessed_data_path is None)
             lazy_loading: If True, tensors are only created when accessed (reduces memory)
             dtype: Tensor data type (torch.float32 or torch.float16 for half precision)
-            field_names: Dictionary mapping standard field types to custom field names
-                         e.g., {'time_field': 'time_features', 'coordinates_field': 'coordinates'}
             lookback: Number of timesteps to look back when creating sequences (default: 24)
             target_field: Name of the field to use as target (default: 'ghi')
+                         Can be a string for single target or list of strings for multiple targets
+            selected_features: List of feature names to include in the prediction input.
+                              If None, all available features are used.
+            include_target_history: Whether to include past values of target field(s) for autoregressive
+                                   modeling (default: True)
+            time_key: Name of the key that contains time features in seq_data (default: 'time_features')
         """
         self.lazy_loading = lazy_loading
         self.dtype = dtype
         self.lookback = lookback
-        self.target_field = target_field
+        self.time_key = time_key
 
-        # Define default field name mappings and update with user-provided ones
-        self.field_names = {
-            'time_field': 'time_features',
-            'coordinates_field': 'coordinates',
-            'elevation_field': 'elevation',
-        }
-        if field_names is not None:
-            self.field_names.update(field_names)
+        # Handle single target field or multiple target fields
+        self.target_field = target_field
+        self.target_fields = [target_field] if isinstance(target_field, str) else list(target_field)
+
+        self.selected_features = selected_features
+        self.include_target_history = include_target_history
+
+        # Initialize tensor containers
+        self.tensors = {}
+        self.temporal_features = None
+        self.static_features = None
+        self.targets_tensor = None
+
+        # Print autoregressive settings
+        if self.include_target_history:
+            print(f"Using autoregressive mode: excluding current timestep")
+        else:
+            print(f"Not using target field history for autoregression")
 
         # Load data if path is provided
         if preprocessed_data_path is not None:
@@ -50,8 +65,38 @@ class TimeSeriesDataset(Dataset):
             self._seq_data = seq_data
             self._targets = targets
 
-        # Identify temporal and static features
-        self._identify_features()
+        # Filter features based on selected_features if provided
+        if self.selected_features is not None:
+            # Create a filtered version of seq_data
+            self._filtered_seq_data = {}
+
+            # Always include certain core features
+            core_features = ['coordinates', 'elevation', self.time_key]
+
+            # Always include the target field(s) in the data
+            for field in self.target_fields:
+                if field not in core_features:
+                    core_features.append(field)
+
+            # Copy only selected features and core features
+            for key, value in self._seq_data.items():
+                if key in self.selected_features or key in core_features:
+                    self._filtered_seq_data[key] = value
+
+            # Print which features will be used
+            feature_keys = [k for k in self._filtered_seq_data.keys()
+                          if k not in core_features or (k in self.target_fields and self.include_target_history)]
+            print(f"Using {len(feature_keys)} selected features: {feature_keys}")
+
+            # Use filtered data for feature identification
+            feature_data = self._filtered_seq_data
+        else:
+            # Use all data for feature identification
+            feature_data = self._seq_data
+            print(f"Using all available features")
+
+        # Identify temporal and static features using the filtered or complete data
+        self._identify_features(feature_data)
 
         # Get number of timesteps and locations from data
         self._get_data_dimensions()
@@ -143,12 +188,12 @@ class TimeSeriesDataset(Dataset):
         # If we couldn't infer from time series, try other approaches
         if not hasattr(self, 'n_timesteps') or not hasattr(self, 'n_locations'):
             # Try to infer from time_features
-            if self.field_names['time_field'] in self._seq_data:
-                self.n_timesteps = self._seq_data[self.field_names['time_field']].shape[0]
+            if self.time_key in self._seq_data:
+                self.n_timesteps = self._seq_data[self.time_key].shape[0]
 
             # Try to infer from coordinates
-            if self.field_names['coordinates_field'] in self._seq_data:
-                self.n_locations = self._seq_data[self.field_names['coordinates_field']].shape[0]
+            if 'coordinates' in self._seq_data:
+                self.n_locations = self._seq_data['coordinates'].shape[0]
 
             # If still missing dimensions, use targets
             if not hasattr(self, 'n_timesteps') or not hasattr(self, 'n_locations'):
@@ -174,7 +219,7 @@ class TimeSeriesDataset(Dataset):
         print(f"Dataset contains {size} possible samples")
         return size
 
-    def _identify_features(self):
+    def _identify_features(self, data_dict=None):
         """
         Identify temporal and static features in the dataset
 
@@ -183,14 +228,25 @@ class TimeSeriesDataset(Dataset):
         - coordinates has shape (locations, 2)
         - elevation has shape (locations,)
         - Most features have shape (time, locations)
+
+        Args:
+            data_dict: Dictionary containing data to identify features from.
+                      If None, uses self._seq_data
         """
+        if data_dict is None:
+            data_dict = self._seq_data
+
         self.temporal_feature_keys = []
         self.static_feature_keys = []
         self.time_series_keys = []
         self.other_keys = []
 
         # Check each key in the seq_data dictionary
-        for key, value in self._seq_data.items():
+        for key, value in data_dict.items():
+            # Skip target fields to avoid mixing with features
+            if key in self.target_fields:
+                continue
+
             if not isinstance(value, np.ndarray):
                 continue
 
@@ -198,18 +254,18 @@ class TimeSeriesDataset(Dataset):
             shape = value.shape
 
             # Special case for time_features
-            if key == self.field_names['time_field'] and len(shape) == 2:
+            if key == self.time_key and len(shape) == 2:
                 # time_features with shape (time, features)
                 self.temporal_feature_keys.append(key)
             # Coordinates with shape (locations, features)
-            elif key == self.field_names['coordinates_field'] and len(shape) == 2 and shape[1] == 2:
+            elif key == 'coordinates' and len(shape) == 2 and shape[1] == 2:
                 self.static_feature_keys.append(key)
             # Elevation with shape (locations,)
-            elif key == self.field_names['elevation_field'] and len(shape) == 1:
+            elif key == 'elevation' and len(shape) == 1:
                 self.static_feature_keys.append(key)
             # Time series data with shape (time, locations)
             elif len(shape) == 2 and (
-                key not in [self.field_names['time_field'], self.field_names['coordinates_field']]
+                key not in [self.time_key, 'coordinates', 'elevation']
             ):
                 self.time_series_keys.append(key)
             # Traditional 3D temporal features (samples, timesteps, features)
@@ -229,169 +285,56 @@ class TimeSeriesDataset(Dataset):
         """Initialize all tensor placeholders to None"""
         # Placeholders for individual tensors
         self.tensors = {key: None for key in self._seq_data.keys()}
-        self.targets_tensor = None
-
-        # Placeholders for combined features
-        self.temporal_features = None
-        self.static_features = None
 
     def _initialize_tensors(self):
         """Initialize all tensors upfront (high memory usage)"""
-        # Convert all data to tensors
-        self.tensors = {}
+        self.preload_all(during_init=True)
 
-        # Process all features in seq_data
-        for key, value in self._seq_data.items():
-            if isinstance(value, np.ndarray):
-                # Handle different feature types
-                if key in self.temporal_feature_keys:
-                    # No special handling for temporal features
-                    self.tensors[key] = torch.tensor(value, dtype=self.dtype)
-                elif key in self.static_feature_keys:
-                    # Static features like coordinates
-                    self.tensors[key] = torch.tensor(value, dtype=self.dtype)
-                elif key in self.time_series_keys:
-                    # Time series features with shape (time, locations)
-                    self.tensors[key] = torch.tensor(value, dtype=self.dtype)
-                else:
+    def preload_all(self, during_init=False):
+        """
+        Explicitly load all tensors into memory at once
+
+        Args:
+            during_init: Whether this is being called during initialization
+        """
+        if during_init or self.lazy_loading:
+            print("Loading all tensors into memory...")
+
+            # Convert all data to tensors
+            self.tensors = {}
+
+            # Process all features in seq_data
+            for key, value in self._seq_data.items():
+                if isinstance(value, np.ndarray):
                     # Default tensor conversion
                     self.tensors[key] = torch.tensor(value, dtype=self.dtype)
 
-        # Convert targets to tensor
-        self.targets_tensor = torch.tensor(self._targets, dtype=self.dtype)
-        if len(self.targets_tensor.shape) == 1:
-            self.targets_tensor = self.targets_tensor.unsqueeze(1)
+            # Convert targets to tensor
+            self._get_targets()
 
-        # Create combined feature tensors
-        self._create_combined_features()
+            # Initialize temporal and static features
+            self._get_temporal_features()
+            self._get_static_features()
 
-        # Clear references to original data to free memory
-        if hasattr(self, '_seq_data'):
-            del self._seq_data
-        if hasattr(self, '_targets'):
-            del self._targets
-        gc.collect()
+            # Load any remaining tensors
+            for key in self._seq_data.keys():
+                if key not in self.tensors or self.tensors[key] is None:
+                    self._get_tensor(key)
 
-    def _create_combined_features(self):
-        """
-        Create combined feature tensors for models that expect this format
+            # Free original data to save memory unless in strict mode
+            if not self.lazy_loading or (self.lazy_loading != "strict"):
+                del self._seq_data
+                del self._targets
+                self._seq_data = None
+                self._targets = None
+                gc.collect()
 
-        For the common structure:
-        1. Extract time features from time_features array
-        2. Reshape static features like elevation for each time step
-        3. Combine with time series features for temporal data
-        """
-        # Combine temporal features if we have any
-        temporal_tensors = []
-
-        # Process time_features if available (shape: time, features)
-        time_field = self.field_names['time_field']
-        if time_field in self.tensors and self.tensors[time_field] is not None:
-            # Get time features tensor
-            time_features = self.tensors[time_field]
-
-            # For 2D time features (time, features), we need to expand it
-            # to match the dimensionality of other time series features
-            if len(time_features.shape) == 2:
-                # We'll reshape it when combining with other features
-                temporal_tensors.append(time_features)
-
-        # Get dimensions for reshaping
-        n_timesteps = None
-        n_locations = None
-
-        # Try to get dimensions from a time series feature
-        for key in self.time_series_keys:
-            if key in self.tensors and self.tensors[key] is not None:
-                n_timesteps, n_locations = self.tensors[key].shape
-                break
-
-        # Process elevation if available (shape: locations)
-        elevation_field = self.field_names['elevation_field']
-        if elevation_field in self.tensors and self.tensors[elevation_field] is not None:
-            elevation = self.tensors[elevation_field]
-
-            # If elevation is 1D (locations), we need to expand it to match
-            # time series features (time, locations)
-            if len(elevation.shape) == 1 and n_timesteps is not None:
-                # Reshape to (1, locations) then repeat for each timestep
-                elevation_expanded = elevation.unsqueeze(0).repeat(n_timesteps, 1)
-                # Now elevation_expanded has shape (time, locations)
-                elevation_feature = elevation_expanded.unsqueeze(2)  # (time, locations, 1)
-                temporal_tensors.append(elevation_feature)
-
-        # Process time series features (shape: time, locations)
-        # We need to reshape them to (time*locations, 1) for sequence creation
-        time_series_features = []
-        for key in self.time_series_keys:
-            if key in self.tensors and self.tensors[key] is not None:
-                # Get the tensor with shape (time, locations)
-                ts_tensor = self.tensors[key]
-
-                # Reshape to (time, locations, 1) for concatenation
-                ts_feature = ts_tensor.unsqueeze(2)  # (time, locations, 1)
-                time_series_features.append(ts_feature)
-
-        # Concatenate time series features if any
-        if time_series_features:
-            # Combine along feature dimension
-            combined_ts = torch.cat(time_series_features, dim=2)  # (time, locations, n_features)
-            temporal_tensors.append(combined_ts)
-
-        # Combine all temporal features if we have any
-        if temporal_tensors:
-            # For now, just use the first temporal tensor
-            # Advanced combination would require reshaping to match dimensions
-            self.temporal_features = temporal_tensors[0]
-        else:
-            self.temporal_features = None
-
-        # Extract static features from coordinates
-        coordinates_field = self.field_names['coordinates_field']
-        if coordinates_field in self.tensors:
-            # Get coordinates - shape (locations, 2)
-            coords = self.tensors[coordinates_field]
-            self.static_features = coords
-        elif self.static_feature_keys:
-            # If we have other static features, use the first one
-            first_key = self.static_feature_keys[0]
-            self.static_features = self.tensors[first_key]
-        else:
-            self.static_features = None
-
-    def _estimate_memory_usage(self):
-        """Estimate memory usage of the dataset"""
-        total_bytes = 0
-
-        # Calculate sizes of arrays
-        for key, value in self._seq_data.items():
-            if isinstance(value, np.ndarray):
-                bytes_per_element = value.itemsize
-                total_bytes += bytes_per_element * value.size
-
-        # Add targets
-        if isinstance(self._targets, np.ndarray):
-            bytes_per_element = self._targets.itemsize
-            total_bytes += bytes_per_element * self._targets.size
-
-        # Convert to MB
-        total_mb = total_bytes / (1024 * 1024)
-        print(f"Estimated memory for raw data: {total_mb:.2f} MB")
-        print(f"Approximate memory if converted to tensors: {total_mb * 1.5:.2f} MB")
-
-    def _get_tensor(self, key, unsqueeze_dim=None):
-        """Get tensor if already created, or create it on demand"""
-        if self.tensors[key] is None:
-            if key in self._seq_data:
-                # Convert to tensor
-                tensor = torch.tensor(self._seq_data[key], dtype=self.dtype)
-                if unsqueeze_dim is not None:
-                    tensor = tensor.unsqueeze(unsqueeze_dim)
-                self.tensors[key] = tensor
+                # Update lazy_loading flag if we're no longer lazy
+                if self.lazy_loading:
+                    self.lazy_loading = False
+                    print("All tensors loaded, original data cleared")
             else:
-                raise KeyError(f"Key {key} not found in seq_data")
-
-        return self.tensors[key]
+                print("All tensors loaded, keeping original data for strict mode")
 
     def _get_temporal_features(self, idx=None):
         """Get or create temporal features tensor"""
@@ -399,58 +342,38 @@ class TimeSeriesDataset(Dataset):
             # Initialize lists to store tensors
             temporal_tensors = []
 
-            # Get time features if available
-            time_field = self.field_names['time_field']
-            if time_field in self._seq_data:
-                time_features = self._get_tensor(time_field)
+            # Process time_features if available (shape: time, features)
+            if self.time_key in self.tensors and self.tensors[self.time_key] is not None:
+                # Get time features tensor
+                time_features = self.tensors[self.time_key]
+                # For 2D time features (time, features), we need to expand it with locations
+                # to match the dimensionality of other time series features
+                if len(time_features.shape) == 2:
+                    time_features = time_features.unsqueeze(1).repeat(1, self.n_locations, 1)
                 temporal_tensors.append(time_features)
-
-            # Get elevation if available
-            elevation_field = self.field_names['elevation_field']
-            if elevation_field in self._seq_data:
-                elevation = self._get_tensor(elevation_field)
-                # Handle reshaping for elevation similar to _create_combined_features
-                if len(elevation.shape) == 1:
-                    # Get dimensions for reshaping
-                    n_timesteps = None
-                    n_locations = len(elevation)
-
-                    # Try to get timesteps from a time series feature
-                    for key in self.time_series_keys:
-                        if key in self._seq_data:
-                            n_timesteps = self._seq_data[key].shape[0]
-                            break
-
-                    if n_timesteps is not None:
-                        # Reshape to (1, locations) then repeat for each timestep
-                        elevation_expanded = elevation.unsqueeze(0).repeat(n_timesteps, 1)
-                        # Add feature dimension
-                        elevation_feature = elevation_expanded.unsqueeze(2)  # (time, locations, 1)
-                        temporal_tensors.append(elevation_feature)
 
             # Process time series features
             time_series_features = []
             for key in self.time_series_keys:
-                if key in self._seq_data:
-                    # Get tensor with shape (time, locations)
-                    ts_tensor = self._get_tensor(key)
+                if key in self.tensors and self.tensors[key] is not None:
+                    # Get the tensor with shape (time, locations)
+                    ts_tensor = self.tensors[key]
 
-                    # Add feature dimension
+                    # Reshape to (time, locations, 1) for concatenation
                     ts_feature = ts_tensor.unsqueeze(2)  # (time, locations, 1)
                     time_series_features.append(ts_feature)
 
-            # Combine time series features
+            # Concatenate time series features if any
             if time_series_features:
+                # Combine along feature dimension
                 combined_ts = torch.cat(time_series_features, dim=2)  # (time, locations, n_features)
                 temporal_tensors.append(combined_ts)
 
             # Combine all temporal features
-            if temporal_tensors:
-                # For now, just use the first tensor
-                self.temporal_features = temporal_tensors[0]
+            if len(temporal_tensors) > 0:
+                self.temporal_features = torch.cat(temporal_tensors, dim=2)
             else:
                 self.temporal_features = None
-                return None
 
             # Free individual tensors if we're in strict memory saving mode
             if self.lazy_loading == "strict":
@@ -467,23 +390,42 @@ class TimeSeriesDataset(Dataset):
     def _get_static_features(self, idx=None):
         """Get or create static features tensor"""
         if self.static_features is None:
-            coordinates_field = self.field_names['coordinates_field']
-            if coordinates_field in self._seq_data:
+            static_features_list = []
+
+            # Add coordinates if available
+            if 'coordinates' in self._seq_data:
                 # Get coordinates tensor
-                coords = self._get_tensor(coordinates_field)
-                self.static_features = coords
+                coords = self._get_tensor('coordinates')
+                static_features_list.append(coords)
+
+            # Add elevation if available
+            if 'elevation' in self._seq_data:
+                # Get elevation tensor
+                elevation = self._get_tensor('elevation')
+                # Reshape to (locations, 1) for concatenation
+                elevation = elevation.unsqueeze(1)
+                static_features_list.append(elevation)
+
+            # Combine static features if we have any
+            if static_features_list:
+                if len(static_features_list) > 1:
+                    # Concatenate along feature dimension
+                    self.static_features = torch.cat(static_features_list, dim=1)
+                else:
+                    # Just use the single static feature
+                    self.static_features = static_features_list[0]
             elif self.static_feature_keys:
-                # Use another static feature if coordinates not available
+                # Use another static feature if coordinates and elevation not available
                 key = self.static_feature_keys[0]
                 self.static_features = self._get_tensor(key)
             else:
                 # No static features available
-                self.static_features = torch.zeros((self.size, 1), dtype=self.dtype)
+                self.static_features = torch.zeros((self.n_locations, 1), dtype=self.dtype)
 
             # Free tensors if we're in strict memory saving mode
             if self.lazy_loading == "strict":
                 for key in self.static_feature_keys:
-                    if key in self.tensors and key != coordinates_field:
+                    if key in self.tensors and key not in ['coordinates', 'elevation']:
                         del self.tensors[key]
                         self.tensors[key] = None
                 gc.collect()
@@ -574,15 +516,67 @@ class TimeSeriesDataset(Dataset):
                     else:  # Time features (time, features)
                         result['temporal_features'] = self.temporal_features[window_start:time_idx, :]
                 else:
-                    # Get single timestep
+                    # For single timestep
                     if len(self.temporal_features.shape) == 3:  # (time, locations, features)
                         result['temporal_features'] = self.temporal_features[time_idx, loc_idx, :]
                     else:  # Time features (time, features)
                         result['temporal_features'] = self.temporal_features[time_idx, :]
 
+            # Handle target history separately for autoregressive modeling
+            if self.include_target_history and self.lookback > 0:
+                target_histories = []
+                for target_field in self.target_fields:
+                    if target_field in self.tensors:
+                        # Get target history window for lookback steps
+                        # We want data from (time_idx - lookback) to (time_idx - 1)
+                        history_start = time_idx - self.lookback
+                        history_end = time_idx  # exclusive
+
+                        # Handle case where history_start is negative (at the beginning of dataset)
+                        if history_start >= 0:
+                            # Normal case - full history available
+                            target_history = self.tensors[target_field][history_start:history_end, loc_idx]
+                        else:
+                            # Need to pad the history with earliest available values
+                            padding_needed = abs(history_start)
+                            available_history = self.tensors[target_field][0:history_end, loc_idx]
+
+                            # Create padding using the earliest available value
+                            earliest_value = self.tensors[target_field][0, loc_idx]
+                            padding = earliest_value.repeat(padding_needed)
+
+                            # Combine padding with available history
+                            target_history = torch.cat([padding, available_history])
+
+                        target_histories.append(target_history.unsqueeze(1))  # Add feature dimension
+
+                if target_histories:
+                    # Combine along feature dimension if we have multiple targets
+                    if len(target_histories) > 1:
+                        combined_history = torch.cat(target_histories, dim=1)
+                    else:
+                        combined_history = target_histories[0]
+
+                    # If there are existing temporal features, combine with them
+                    if 'temporal_features' in result:
+                        # Check dimension to decide how to concatenate
+                        if len(result['temporal_features'].shape) == 2:
+                            # (seq_len, features) - combine along feature dimension
+                            if len(combined_history.shape) == 1:
+                                # Need to add feature dimension
+                                combined_history = combined_history.unsqueeze(1)
+                            result['temporal_features'] = torch.cat([result['temporal_features'], combined_history], dim=1)
+                        else:
+                            # Handle other cases if needed
+                            pass
+                    else:
+                        # No existing temporal features, just use the target history
+                        result['temporal_features'] = combined_history
+
             # Add time series features (all shape time, locations)
             for key in self.time_series_keys:
                 if key in self.tensors:
+                    # Non-target fields are included as separate entries for easier model access
                     if self.lookback > 0:
                         # Get sequence window
                         result[key] = self.tensors[key][window_start:time_idx, loc_idx]
@@ -593,6 +587,7 @@ class TimeSeriesDataset(Dataset):
             # Add nighttime field
             if 'nighttime_mask' in self.tensors:
                 if self.lookback > 0:
+                    # Nighttime is auxiliary info, not a target, so we include all timesteps
                     result['nighttime'] = self.tensors['nighttime_mask'][window_start:time_idx, loc_idx]
                 else:
                     result['nighttime'] = self.tensors['nighttime_mask'][time_idx, loc_idx]
@@ -631,34 +626,86 @@ class TimeSeriesDataset(Dataset):
             if len(result['target'].shape) == 0:  # Scalar
                 result['target'] = result['target'].unsqueeze(0)
 
+            # Add time features and other temporal features
+            temporal_features_list = []
+
             # Add time features
-            time_field = self.field_names['time_field']
-            if time_field in self._seq_data:
+            if self.time_key in self._seq_data:
                 if self.lookback > 0:
                     # Get sequence window
                     time_features = torch.tensor(
-                        self._seq_data[time_field][window_start:time_idx],
+                        self._seq_data[self.time_key][window_start:time_idx],
                         dtype=self.dtype
                     )
+                    temporal_features_list.append(time_features)
                 else:
                     # Get single timestep
                     time_features = torch.tensor(
-                        self._seq_data[time_field][time_idx],
+                        self._seq_data[self.time_key][time_idx],
                         dtype=self.dtype
                     )
-                result['temporal_features'] = time_features
+                    temporal_features_list.append(time_features)
 
-            # Add time series features (all with shape time, locations)
+            # Add time series features
             for key in self.time_series_keys:
                 if key in self._seq_data:
+                    # For non-target fields, include all timesteps
                     if self.lookback > 0:
                         # Get sequence window for this location
                         feature_val = self._seq_data[key][window_start:time_idx, loc_idx]
                     else:
                         # Get single timestep for this location
                         feature_val = self._seq_data[key][time_idx, loc_idx]
-
                     result[key] = torch.tensor(feature_val, dtype=self.dtype)
+
+            # Add target history for autoregressive modeling
+            if self.include_target_history and self.lookback > 0:
+                target_histories = []
+                for target_field in self.target_fields:
+                    if target_field in self._seq_data:
+                        # Get target history window for lookback steps
+                        # We want data from (time_idx - lookback) to (time_idx - 1)
+                        history_start = time_idx - self.lookback
+                        history_end = time_idx  # exclusive
+
+                        # Handle case where history_start is negative (at the beginning of dataset)
+                        if history_start >= 0:
+                            # Normal case - full history available
+                            target_history = self._seq_data[target_field][history_start:history_end, loc_idx]
+                        else:
+                            # Need to pad the history with earliest available values
+                            padding_needed = abs(history_start)
+                            available_history = self._seq_data[target_field][0:history_end, loc_idx]
+
+                            # Create padding using the earliest available value
+                            earliest_value = self._seq_data[target_field][0, loc_idx]
+                            padding = np.repeat(earliest_value, padding_needed)
+
+                            # Combine padding with available history
+                            target_history = np.concatenate([padding, available_history])
+
+                        # Convert to tensor
+                        target_history_tensor = torch.tensor(target_history, dtype=self.dtype)
+                        target_histories.append(target_history_tensor.unsqueeze(1))  # Add feature dimension
+
+                if target_histories:
+                    # Combine along feature dimension if we have multiple targets
+                    if len(target_histories) > 1:
+                        combined_history = torch.cat(target_histories, dim=1)
+                    else:
+                        combined_history = target_histories[0]
+
+                    # Add to temporal features list
+                    temporal_features_list.append(combined_history)
+
+            # Combine all temporal features
+            if temporal_features_list:
+                if len(temporal_features_list) == 1:
+                    result['temporal_features'] = temporal_features_list[0]
+                else:
+                    # Need to concatenate - this depends on the shape of each tensor
+                    # For now, we assume they all have the same structure and concatenate on last dimension
+                    result['temporal_features'] = torch.cat(temporal_features_list, dim=-1)
 
             # Add nighttime field
             if 'nighttime_mask' in self._seq_data:
@@ -678,33 +725,10 @@ class TimeSeriesDataset(Dataset):
 
             return result
 
-    def preload_all(self):
-        """Explicitly load all tensors into memory at once"""
-        if self.lazy_loading:
-            print("Preloading all tensors into memory...")
-
-            # Load temporal and static features
-            self._get_temporal_features()
-            self._get_static_features()
-            self._get_targets()
-
-            # Load all remaining tensors
-            for key in self._seq_data.keys():
-                if key not in self.tensors or self.tensors[key] is None:
-                    self._get_other_tensor(key)
-
-            # Free original data to save memory
-            if self.lazy_loading != "strict":
-                del self._seq_data
-                del self._targets
-                self._seq_data = None
-                self._targets = None
-                gc.collect()
-                self.lazy_loading = False
-                print("All tensors loaded, original data cleared")
-
     @classmethod
-    def from_file(cls, filepath, lazy_loading=False, dtype=torch.float32, field_names=None, lookback=24, target_field='ghi'):
+    def from_file(cls, filepath, lazy_loading=False, dtype=torch.float32,
+                 lookback=24, target_field='ghi', selected_features=None,
+                 include_target_history=True, time_key='time_features'):
         """
         Create dataset directly from a saved file
 
@@ -714,9 +738,11 @@ class TimeSeriesDataset(Dataset):
             filepath: Path to the saved file
             lazy_loading: If True, tensors are only created when accessed
             dtype: Tensor data type
-            field_names: Dictionary mapping standard field types to custom field names
             lookback: Number of timesteps to look back
             target_field: Name of the field to use as target (default: 'ghi')
+            selected_features: List of feature names to include in the prediction input
+            include_target_history: Whether to include past values of target field(s) (default: True)
+            time_key: Name of the key that contains time features in the data (default: 'time_features')
 
         Returns:
             dataset: TimeSeriesDataset instance
@@ -725,7 +751,43 @@ class TimeSeriesDataset(Dataset):
             preprocessed_data_path=filepath,
             lazy_loading=lazy_loading,
             dtype=dtype,
-            field_names=field_names,
             lookback=lookback,
-            target_field=target_field
+            target_field=target_field,
+            selected_features=selected_features,
+            include_target_history=include_target_history,
+            time_key=time_key
         )
+
+    def _estimate_memory_usage(self):
+        """Estimate memory usage of the dataset"""
+        total_bytes = 0
+
+        # Calculate sizes of arrays
+        for key, value in self._seq_data.items():
+            if isinstance(value, np.ndarray):
+                bytes_per_element = value.itemsize
+                total_bytes += bytes_per_element * value.size
+
+        # Add targets
+        if isinstance(self._targets, np.ndarray):
+            bytes_per_element = self._targets.itemsize
+            total_bytes += bytes_per_element * self._targets.size
+
+        # Convert to MB
+        total_mb = total_bytes / (1024 * 1024)
+        print(f"Estimated memory for raw data: {total_mb:.2f} MB")
+        print(f"Approximate memory if converted to tensors: {total_mb * 1.5:.2f} MB")
+
+    def _get_tensor(self, key, unsqueeze_dim=None):
+        """Get tensor if already created, or create it on demand"""
+        if self.tensors[key] is None:
+            if key in self._seq_data:
+                # Convert to tensor
+                tensor = torch.tensor(self._seq_data[key], dtype=self.dtype)
+                if unsqueeze_dim is not None:
+                    tensor = tensor.unsqueeze(unsqueeze_dim)
+                self.tensors[key] = tensor
+            else:
+                raise KeyError(f"Key {key} not found in seq_data")
+
+        return self.tensors[key]

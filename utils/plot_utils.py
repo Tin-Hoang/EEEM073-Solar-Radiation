@@ -2,6 +2,8 @@
 Plotting utilities for GHI forecasting visualization.
 """
 
+import os
+from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.dates import DateFormatter
@@ -649,12 +651,14 @@ def plot_evaluation_metrics(metrics, model_name=''):
     metrics_text += f"  MSE: {metrics['mse']:.2f}\n"
     metrics_text += f"  RMSE: {metrics['rmse']:.2f}\n"
     metrics_text += f"  MAE: {metrics['mae']:.2f}\n"
+    metrics_text += f"  WAPE: {metrics['wape']:.2f}\n"
     metrics_text += f"  R²: {metrics['r2']:.4f}\n\n"
 
     metrics_text += f"Daytime Metrics:\n"
     metrics_text += f"  MSE: {metrics['day_mse']:.2f}\n"
     metrics_text += f"  RMSE: {metrics['day_rmse']:.2f}\n"
     metrics_text += f"  MAE: {metrics['day_mae']:.2f}\n"
+    metrics_text += f"  WAPE: {metrics['day_wape']:.2f}\n"
     metrics_text += f"  R²: {metrics['day_r2']:.4f}\n\n"
 
     if has_nighttime:
@@ -662,6 +666,7 @@ def plot_evaluation_metrics(metrics, model_name=''):
         metrics_text += f"  MSE: {metrics['night_mse']:.2f}\n"
         metrics_text += f"  RMSE: {metrics['night_rmse']:.2f}\n"
         metrics_text += f"  MAE: {metrics['night_mae']:.2f}\n"
+        metrics_text += f"  WAPE: {metrics['night_wape']:.2f}\n"
         # Fix the f-string formatting - move conditional outside format specifier
         r2_str = f"{metrics['night_r2']:.4f}" if not np.isnan(metrics['night_r2']) else "N/A"
         metrics_text += f"  R²: {r2_str}\n\n"
@@ -716,8 +721,8 @@ def compare_models(model_metrics_dict, dataset_name=""):
         raise ValueError("No models provided for comparison")
 
     # Define metrics to compare
-    metrics = ['mse', 'rmse', 'mae', 'r2']
-    metric_labels = ['MSE', 'RMSE', 'MAE', 'R²']
+    metrics = ['mse', 'rmse', 'mae', 'wape', 'r2']
+    metric_labels = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']
 
     # Include inference speed metrics if available
     inference_metrics = []
@@ -757,6 +762,11 @@ def compare_models(model_metrics_dict, dataset_name=""):
     fig = create_comparison_plots(comparison, model_names, dataset_name)
     plt.show()
 
+    # Save the figure
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs('plots', exist_ok=True)
+    plt.savefig(f'plots/model_comparison_{dataset_name}_{timestamp}.png')
+
     return comparison, fig
 
 
@@ -791,7 +801,7 @@ def create_comparison_plots(comparison_df, model_names, dataset_name=""):
     fig = plt.figure(figsize=(18, 7 * rows))
 
     # Get metrics from the DataFrame
-    error_metrics = ['MSE', 'RMSE', 'MAE']
+    error_metrics = ['MSE', 'RMSE', 'MAE', 'WAPE']
     r2_metric = ['R²']
     performance_metrics = error_metrics + r2_metric  # Combined metrics
     speed_metrics = ['Samples/sec', 'ms/sample'] if has_inference_metrics else []
@@ -802,7 +812,7 @@ def create_comparison_plots(comparison_df, model_names, dataset_name=""):
     # Create a color map for models
     model_color_map = {model: model_colors[i % len(model_colors)] for i, model in enumerate(model_names)}
 
-    # 1. Combined chart for all performance metrics (MSE, RMSE, MAE, R²) - grouped by metrics
+    # 1. Combined chart for all performance metrics (MSE, RMSE, MAE, WAPE, R²) - grouped by metrics
     ax_metrics = plt.subplot(rows, cols, 1)
 
     # Create a copy of the metrics data
@@ -850,6 +860,7 @@ def create_comparison_plots(comparison_df, model_names, dataset_name=""):
         f'MSE{f" (÷{scaling_factor_mse:.0f})" if scaling_factor_mse > 1 else ""}',
         'RMSE',
         'MAE',
+        'WAPE',
         f'R²{f" (×{scaling_factor_r2:.0f})" if scaling_factor_r2 != 1 else ""}'
     ])
     ax_metrics.grid(axis='y', linestyle='--', alpha=0.7)
@@ -904,7 +915,7 @@ def create_comparison_plots(comparison_df, model_names, dataset_name=""):
     ax_radar = plt.subplot(rows, cols, 3, polar=True)
 
     # Prepare data for performance radar chart (excluding inference metrics)
-    perf_metrics = ['MSE', 'RMSE', 'MAE', 'R²']
+    perf_metrics = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']
 
     # Create radar dataframe for performance metrics
     perf_radar_dict = {}
@@ -994,7 +1005,7 @@ def create_comparison_plots(comparison_df, model_names, dataset_name=""):
 
     # Create a DataFrame for the heatmap with normalized metrics
     # Use all metrics: error metrics, R², and inference metrics
-    metrics_for_heatmap = ['MSE', 'RMSE', 'MAE', 'R²', 'Samples/sec', 'ms/sample']
+    metrics_for_heatmap = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²', 'Samples/sec', 'ms/sample']
     metrics_avail = [m for m in metrics_for_heatmap if m in comparison_df.index]
     heatmap_df = pd.DataFrame(index=metrics_avail, columns=model_names, dtype=float)
 
@@ -1069,15 +1080,15 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
 
     # Create DataFrames for each time period (overall, daytime, nighttime)
     overall_data = {
-        'MSE': [], 'RMSE': [], 'MAE': [], 'R²': []
+        'MSE': [], 'RMSE': [], 'MAE': [], 'WAPE': [], 'R²': []
     }
 
     daytime_data = {
-        'MSE': [], 'RMSE': [], 'MAE': [], 'R²': []
+        'MSE': [], 'RMSE': [], 'MAE': [], 'WAPE': [], 'R²': []
     }
 
     nighttime_data = {
-        'MSE': [], 'RMSE': [], 'MAE': [], 'R²': []
+        'MSE': [], 'RMSE': [], 'MAE': [], 'WAPE': [], 'R²': []
     }
 
     # Extract metrics for each model
@@ -1088,18 +1099,21 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
         overall_data['MSE'].append(metrics['mse'])
         overall_data['RMSE'].append(metrics['rmse'])
         overall_data['MAE'].append(metrics['mae'])
+        overall_data['WAPE'].append(metrics['wape'])
         overall_data['R²'].append(metrics['r2'])
 
         # Daytime metrics
         daytime_data['MSE'].append(metrics['day_mse'])
         daytime_data['RMSE'].append(metrics['day_rmse'])
         daytime_data['MAE'].append(metrics['day_mae'])
+        daytime_data['WAPE'].append(metrics['day_wape'])
         daytime_data['R²'].append(metrics['day_r2'])
 
         # Nighttime metrics
         nighttime_data['MSE'].append(metrics['night_mse'])
         nighttime_data['RMSE'].append(metrics['night_rmse'])
         nighttime_data['MAE'].append(metrics['night_mae'])
+        nighttime_data['WAPE'].append(metrics['night_wape'])
         nighttime_data['R²'].append(metrics['night_r2'])
 
     # Create DataFrames
@@ -1120,7 +1134,7 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
 
     # Plot radar charts for each time period in the first row
     ax1 = fig.add_subplot(gs[0, 0], polar=True)
-    plot_radar_chart(ax1, overall_df[['MSE', 'RMSE', 'MAE', 'R²']], model_names, model_color_map, title='Overall Performance')
+    plot_radar_chart(ax1, overall_df[['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']], model_names, model_color_map, title='Overall Performance')
 
     ax2 = fig.add_subplot(gs[0, 1], polar=True)
     plot_radar_chart(ax2, daytime_df, model_names, model_color_map, title='Daytime Performance')
@@ -1130,7 +1144,7 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
 
     # Create heatmaps for each time period in the second row
     ax4 = fig.add_subplot(gs[1, 0])
-    plot_heatmap(ax4, overall_df[['MSE', 'RMSE', 'MAE', 'R²']].transpose(), "Overall Metrics Heatmap")
+    plot_heatmap(ax4, overall_df[['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']].transpose(), "Overall Metrics Heatmap")
 
     ax5 = fig.add_subplot(gs[1, 1])
     plot_heatmap(ax5, daytime_df.transpose(), "Daytime Metrics Heatmap")
@@ -1149,13 +1163,18 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
     # Adjust figure layout
     fig.subplots_adjust(top=0.90)
 
+    # Save the figure
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs('plots', exist_ok=True)
+    plt.savefig(f'plots/model_comparison_daytime_nighttime_{dataset_name}_{timestamp}.png')
+
     return fig
 
 
 def plot_radar_chart(ax, df, model_names, model_color_map, title):
     """Helper function to plot a radar chart for comparing models"""
     # Metrics to include in radar chart
-    metrics = ['MSE', 'RMSE', 'MAE', 'R²']
+    metrics = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']
 
     # Create a normalized version of the dataframe for radar chart
     normalized_df = pd.DataFrame(index=df.index, columns=metrics)

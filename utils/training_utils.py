@@ -17,7 +17,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @track_experiment
-def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, patience=10, lr=0.001, debug_mode=False):
+def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, patience=10, lr=0.001, debug_mode=False, target_scaler=None):
     """
     Train a model and validate it
 
@@ -30,6 +30,7 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
         patience: Early stopping patience
         lr: Learning rate
         debug_mode: Whether to run as debug mode (only run 10 batches per epoch)
+        target_scaler: Scaler for the target variable (required for evaluate_model)
 
     Returns:
         history: Dictionary of training history
@@ -50,7 +51,9 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
     if is_wandb_enabled():
         # wandb.watch(model, log="all", log_freq=2)
         try:
-            model_summary = get_model_summary(model)
+            model_summary = get_model_summary(model,
+                                              train_loader.dataset[0]['temporal_features'].shape,
+                                              train_loader.dataset[0]['static_features'].shape)
         except:
             model_summary = repr(model)
 
@@ -112,59 +115,19 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
             if debug_mode and debug_counter > 10:
                 break
 
-        train_loss /= len(train_loader.dataset)
-        train_mae /= len(train_loader.dataset)
+        # Validation phase - using evaluate_model
+        # Note: evaluate_model handles model.eval() and torch.no_grad() internally
+        val_metrics = evaluate_model(
+            model=model,
+            data_loader=val_loader,
+            target_scaler=target_scaler,
+            model_name=f"Validation {model_name} (Epoch {epoch+1})",
+            log_to_wandb=False  # We'll handle wandb logging separately for training
+        )
 
-        # Validation phase
-        model.eval()
-        val_loss = 0.0
-        val_mae = 0.0
-
-        with torch.no_grad():
-            # Use tqdm for validation batches as well
-            val_loop = tqdm(val_loader, desc=f"Validating {model_name}", leave=False)
-            debug_counter = 0
-            for batch in val_loop:
-                # Check for required fields
-                if 'temporal_features' not in batch or 'static_features' not in batch or 'target' not in batch:
-                    raise ValueError("Batch missing required fields: 'temporal_features', 'static_features', or 'target'")
-
-                temporal_features = batch['temporal_features'].to(device)
-                static_features = batch['static_features'].to(device)
-                target = batch['target'].to(device)
-
-                # Ensure target has the right shape for broadcasting
-                if len(target.shape) == 1 and target.shape[0] > 1:
-                    # If target is [batch_size], reshape to [batch_size, 1]
-                    target = target.view(-1, 1)
-
-                output = model(temporal_features, static_features)
-
-                # Ensure shapes match for loss calculation
-                if output.shape != target.shape:
-                    if len(output.shape) > len(target.shape):
-                        # If output has more dimensions than target, reshape target
-                        target = target.view(*output.shape)
-                    else:
-                        # If target has more dimensions, reshape output
-                        output = output.view(*target.shape)
-
-                loss = criterion(output, target)
-                batch_loss = loss.item()
-                batch_mae = F.l1_loss(output, target, reduction='mean').item()
-
-                val_loss += loss.item() * temporal_features.size(0)
-                val_mae += F.l1_loss(output, target, reduction='sum').item()
-
-                # Update validation progress bar
-                val_loop.set_postfix(loss=batch_loss, mae=batch_mae)
-
-                debug_counter += 1
-                if debug_mode and debug_counter > 10:
-                    break
-
-        val_loss /= len(val_loader.dataset)
-        val_mae /= len(val_loader.dataset)
+        # Extract metrics needed for training loop
+        val_loss = val_metrics['mse']  # MSE is equivalent to the criterion we use (nn.MSELoss)
+        val_mae = val_metrics['mae']
 
         # Update learning rate
         scheduler.step(val_loss)
@@ -338,6 +301,11 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
     mae = mean_absolute_error(y_true_orig, y_pred_orig)
     r2 = r2_score(y_true_orig, y_pred_orig)
 
+    # Calculate WAPE (Weighted Absolute Percentage Error)
+    abs_error_sum = np.sum(np.abs(y_true_orig - y_pred_orig))
+    abs_actual_sum = np.sum(np.abs(y_true_orig))
+    wape = (abs_error_sum / abs_actual_sum) * 100 if abs_actual_sum > 0 else float('nan')
+
     # Calculate daytime/nighttime metrics if we have nighttime data
     if has_nighttime_data:
         night_mask = all_nighttime.flatten() > 0.5
@@ -352,22 +320,32 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
         day_rmse = np.sqrt(day_mse)
         day_mae = mean_absolute_error(y_true_orig[day_mask], y_pred_orig[day_mask])
         day_r2 = r2_score(y_true_orig[day_mask], y_pred_orig[day_mask])
+
+        # Calculate daytime WAPE
+        day_abs_error_sum = np.sum(np.abs(y_true_orig[day_mask] - y_pred_orig[day_mask]))
+        day_abs_actual_sum = np.sum(np.abs(y_true_orig[day_mask]))
+        day_wape = (day_abs_error_sum / day_abs_actual_sum) * 100 if day_abs_actual_sum > 0 else float('nan')
     else:
-        day_mse = day_rmse = day_mae = day_r2 = np.nan
+        day_mse = day_rmse = day_mae = day_r2 = day_wape = np.nan
 
     if np.sum(night_mask) > 0:
         night_mse = mean_squared_error(y_true_orig[night_mask], y_pred_orig[night_mask])
         night_rmse = np.sqrt(night_mse)
         night_mae = mean_absolute_error(y_true_orig[night_mask], y_pred_orig[night_mask])
         night_r2 = r2_score(y_true_orig[night_mask], y_pred_orig[night_mask]) if np.unique(y_true_orig[night_mask]).size > 1 else np.nan
+
+        # Calculate nighttime WAPE
+        night_abs_error_sum = np.sum(np.abs(y_true_orig[night_mask] - y_pred_orig[night_mask]))
+        night_abs_actual_sum = np.sum(np.abs(y_true_orig[night_mask]))
+        night_wape = (night_abs_error_sum / night_abs_actual_sum) * 100 if night_abs_actual_sum > 0 else float('nan')
     else:
-        night_mse = night_rmse = night_mae = night_r2 = np.nan
+        night_mse = night_rmse = night_mae = night_r2 = night_wape = np.nan
 
     # Create evaluation metrics dictionary
     metrics = {
-        'mse': mse, 'rmse': rmse, 'mae': mae, 'r2': r2,
-        'day_mse': day_mse, 'day_rmse': day_rmse, 'day_mae': day_mae, 'day_r2': day_r2,
-        'night_mse': night_mse, 'night_rmse': night_rmse, 'night_mae': night_mae, 'night_r2': night_r2,
+        'mse': mse, 'rmse': rmse, 'mae': mae, 'r2': r2, 'wape': wape,
+        'day_mse': day_mse, 'day_rmse': day_rmse, 'day_mae': day_mae, 'day_r2': day_r2, 'day_wape': day_wape,
+        'night_mse': night_mse, 'night_rmse': night_rmse, 'night_mae': night_mae, 'night_r2': night_r2, 'night_wape': night_wape,
         'y_pred': y_pred_orig, 'y_true': y_true_orig, 'nighttime': all_nighttime,
         'total_inference_time': total_inference_time,
         'total_samples': total_samples,
@@ -377,13 +355,14 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
 
     # Print metrics
     print(f"\n{model_name} Evaluation Metrics:")
-    print(f"  Overall:  MSE: {mse:.2f}, RMSE: {rmse:.2f}, MAE: {mae:.2f}, R²: {r2:.4f}")
-    print(f"  Daytime:  MSE: {day_mse:.2f}, RMSE: {day_rmse:.2f}, MAE: {day_mae:.2f}, R²: {day_r2:.4f}")
+    print(f"  Overall:  MSE: {mse:.2f}, RMSE: {rmse:.2f}, MAE: {mae:.2f}, R²: {r2:.4f}, WAPE: {wape:.2f}%")
+    print(f"  Daytime:  MSE: {day_mse:.2f}, RMSE: {day_rmse:.2f}, MAE: {day_mae:.2f}, R²: {day_r2:.4f}, WAPE: {day_wape:.2f}%")
 
     if has_nighttime_data:
         # Fix the f-string formatting - move conditional outside format specifier
         r2_str = f"{night_r2:.4f}" if not np.isnan(night_r2) else "N/A"
-        print(f"  Nighttime: MSE: {night_mse:.2f}, RMSE: {night_rmse:.2f}, MAE: {night_mae:.2f}, R²: {r2_str}")
+        wape_str = f"{night_wape:.2f}%" if not np.isnan(night_wape) else "N/A"
+        print(f"  Nighttime: MSE: {night_mse:.2f}, RMSE: {night_rmse:.2f}, MAE: {night_mae:.2f}, R²: {r2_str}, WAPE: {wape_str}")
     else:
         print("  Nighttime metrics: Not available (no nighttime data)")
 
@@ -403,7 +382,8 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
                 ["MSE", float(mse), float(day_mse), float(night_mse)],
                 ["RMSE", float(rmse), float(day_rmse), float(night_rmse)],
                 ["MAE", float(mae), float(day_mae), float(night_mae)],
-                ["R²", float(r2), float(day_r2), float(night_r2)]
+                ["WAPE", float(wape), float(day_wape), float(night_wape)],
+                ["R²", float(r2), float(day_r2), float(night_r2)],
             ]
         )
 
@@ -414,7 +394,7 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
                 ["Total Inference Time (s)", float(total_inference_time)],
                 ["Total Samples", int(total_samples)],
                 ["Avg Time per Sample (ms)", float(avg_time_per_sample * 1000)],
-                ["Samples per Second", float(samples_per_second)]
+                ["Samples per Second", float(samples_per_second)],
             ]
         )
 
@@ -423,6 +403,7 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
             f"{eval_prefix}mse": mse,
             f"{eval_prefix}rmse": rmse,
             f"{eval_prefix}mae": mae,
+            f"{eval_prefix}wape": wape,
             f"{eval_prefix}r2": r2,
             f"{eval_prefix}inference_speed_samples_per_sec": samples_per_second,
             f"{eval_prefix}inference_time_ms_per_sample": avg_time_per_sample * 1000
