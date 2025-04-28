@@ -1280,3 +1280,147 @@ def plot_heatmap(ax, df, title):
                 linewidths=0.5, cbar=False)
 
     ax.set_title(title)
+
+
+def plot_predictions_over_time(models, model_names, data_loader, target_scaler, num_samples=200, start_idx=0):
+    """
+    Plot time series predictions for multiple models with nighttime shading if available
+
+    Args:
+        models: List of PyTorch models
+        model_names: List of model names
+        data_loader: Data loader
+        target_scaler: Scaler for the target variable
+        num_samples: Number of consecutive time steps to plot
+        start_idx: Starting index in the dataset
+    """
+    import torch
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import os
+    from matplotlib.patches import Patch
+
+    # Get device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Collect data samples
+    all_batches = []
+    for batch in data_loader:
+        all_batches.append(batch)
+        if len(all_batches) * batch['target'].shape[0] > start_idx + num_samples:
+            break
+
+    # Combine batches into a single dataset
+    all_temporal = []
+    all_static = []
+    all_targets = []
+    all_nighttime = []
+    has_nighttime = False
+
+    for batch in all_batches:
+        all_temporal.append(batch['temporal_features'])
+        all_static.append(batch['static_features'])
+        all_targets.append(batch['target'])
+        # Check if nighttime data is available
+        if 'nighttime' in batch:
+            has_nighttime = True
+            all_nighttime.append(batch['nighttime'])
+
+    all_temporal = torch.cat(all_temporal, dim=0)
+    all_static = torch.cat(all_static, dim=0)
+    all_targets = torch.cat(all_targets, dim=0)
+
+    if has_nighttime:
+        all_nighttime = torch.cat(all_nighttime, dim=0)
+
+    # Get the subset for visualization
+    temporal = all_temporal[start_idx:start_idx+num_samples].to(device)
+    static = all_static[start_idx:start_idx+num_samples].to(device)
+    targets = all_targets[start_idx:start_idx+num_samples].cpu().numpy()
+
+    if has_nighttime:
+        nighttime = all_nighttime[start_idx:start_idx+num_samples].cpu().numpy()
+        # Ensure nighttime is a 1D array
+        if len(nighttime.shape) > 1:
+            nighttime = nighttime.flatten() if nighttime.shape[1] == 1 else nighttime[:,0]
+
+    # Generate predictions
+    predictions = []
+    for model in models:
+        model.eval()
+        with torch.no_grad():
+            outputs = model(temporal, static).cpu().numpy()
+            predictions.append(outputs)
+
+    # Inverse transform to original scale
+    y_true_orig = target_scaler.inverse_transform(targets.reshape(-1, 1)).flatten()
+    y_pred_orig_list = [target_scaler.inverse_transform(pred.reshape(-1, 1)).flatten() for pred in predictions]
+
+    # Create visualization
+    fig = plt.figure(figsize=(15, 8))
+    ax = plt.gca()
+
+    # Define colors and line styles for predictions
+    colors = ['blue', 'red', 'green', 'magenta', 'cyan', 'orange']
+    line_styles = ['-', '--', ':', '-.', '--', ':']
+
+    # Plot actual values
+    actual_line, = plt.plot(y_true_orig, 'k-', label='Actual GHI', linewidth=2)
+
+    # Plot predictions and collect handles/labels
+    pred_lines = []
+    handles = [actual_line]
+    labels = ['Actual GHI']
+
+    for i, (pred, name) in enumerate(zip(y_pred_orig_list, model_names)):
+        color = colors[i % len(colors)]
+        style = line_styles[i % len(line_styles)]
+        line, = plt.plot(pred, color=color, linestyle=style, label=f'{name} Predicted', alpha=0.7)
+        pred_lines.append(line)
+        handles.append(line)
+        labels.append(f'{name} Predicted')
+
+    # If we have nighttime data, shade those regions
+    night_patch = None
+    night_regions = []
+    if has_nighttime:
+        nighttime_bool = (nighttime > 0.5)
+        start = None
+        for i, is_night in enumerate(nighttime_bool):
+            if is_night and start is None:
+                start = i
+            elif not is_night and start is not None:
+                night_regions.append((start, i))
+                start = None
+        if start is not None:
+            night_regions.append((start, len(nighttime_bool)))
+        for start, end in night_regions:
+            ax.axvspan(start, end, alpha=0.2, color='gray', label='_nolegend_')
+        if night_regions:
+            night_patch = Patch(facecolor='gray', alpha=0.2, label='Nighttime')
+            handles.append(night_patch)
+            labels.append('Nighttime')
+
+    # Calculate and display error metrics for the visualization window
+    for i, (pred, name) in enumerate(zip(y_pred_orig_list, model_names)):
+        rmse = np.sqrt(np.mean((y_true_orig - pred) ** 2))
+        mae = np.mean(np.abs(y_true_orig - pred))
+        plt.annotate(f"{name}: RMSE={rmse:.2f}, MAE={mae:.2f}",
+                     xy=(0.02, 0.97 - 0.03*i),
+                     xycoords='axes fraction',
+                     fontsize=9,
+                     bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8))
+
+    plt.title('GHI Predictions Over Time')
+    plt.xlabel('Time Step')
+    plt.ylabel('GHI (W/m²)')
+
+    # Set the legend with the correct handles and labels
+    plt.legend(handles, labels, loc='upper right')
+
+    plt.grid(True)
+    plt.tight_layout()
+    # Save the figure
+    os.makedirs('plots', exist_ok=True)
+    plt.savefig('plots/predictions_over_time.png')
+    return fig
