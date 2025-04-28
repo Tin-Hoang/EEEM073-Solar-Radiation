@@ -120,7 +120,7 @@ def plot_predictions(y_true, y_pred, timestamps=None, horizon=None, sample_indic
     plt.tight_layout()
     return fig
 
-def get_model_summary(model, temporal_shape, static_shape):
+def get_model_summary(model, temporal_shape=None, static_shape=None):
     """
     Generate a detailed summary of a PyTorch model using torchinfo.
 
@@ -136,17 +136,20 @@ def get_model_summary(model, temporal_shape, static_shape):
 
     # Create dummy inputs with appropriate shapes
     try:
-        # Generate the summary
-        model_summary = summary(
-            model,
-            input_data=[
-                torch.zeros(temporal_shape),
-                torch.zeros(static_shape)
-            ],
-            col_names=["input_size", "output_size", "num_params", "trainable"],
-            col_width=20,
-            row_settings=["var_names"]
-            )
+        if temporal_shape is None or static_shape is None:
+            model_summary = summary(model)
+        else:
+            # Generate the summary
+            model_summary = summary(
+                model,
+                input_data=[
+                    torch.zeros(temporal_shape),
+                    torch.zeros(static_shape)
+                ],
+                col_names=["input_size", "output_size", "num_params", "trainable"],
+                col_width=20,
+                row_settings=["var_names"]
+                )
     except IndexError:
         # Fallback to default summary if dimension input error
         model_summary = summary(model)
@@ -156,7 +159,7 @@ def get_model_summary(model, temporal_shape, static_shape):
 
     return model_summary
 
-def print_model_info(model, temporal_shape, static_shape):
+def print_model_info(model, temporal_shape=None, static_shape=None):
     """
     Print compact model information including parameter count and layer structure.
 

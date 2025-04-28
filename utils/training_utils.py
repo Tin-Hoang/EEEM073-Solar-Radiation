@@ -17,7 +17,18 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @track_experiment
-def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, patience=10, lr=0.001, debug_mode=False, target_scaler=None):
+def train_model(
+    model,
+    train_loader,
+    val_loader,
+    model_name="Model",
+    epochs=50,
+    patience=10,
+    lr=0.001,
+    debug_mode=False,
+    target_scaler=None,
+    config=None
+):
     """
     Train a model and validate it
 
@@ -31,6 +42,7 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
         lr: Learning rate
         debug_mode: Whether to run as debug mode (only run 10 batches per epoch)
         target_scaler: Scaler for the target variable (required for evaluate_model)
+        config: Configuration dictionary (optional)
 
     Returns:
         history: Dictionary of training history
@@ -47,29 +59,14 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
     counter = 0
     best_model_state = None
 
-    # Log model architecture if using wandb
-    if is_wandb_enabled():
-        # wandb.watch(model, log="all", log_freq=2)
-        try:
-            model_summary = get_model_summary(model,
-                                              train_loader.dataset[0]['temporal_features'].shape,
-                                              train_loader.dataset[0]['static_features'].shape)
-        except:
-            model_summary = repr(model)
-
-        # Log model architecture
-        wandb.log({
-            "model_architecture": model_summary
-        })
-
     # Instead of wrapping epochs in tqdm, we'll manually print epoch progress
     for epoch in range(epochs):
-        print(f"Epoch {epoch+1}/{epochs}")
         # Training phase
         model.train()
-        train_loss = 0.0
-        train_mae = 0.0
+        all_train_outputs = []
+        all_train_targets = []
         debug_counter = 0
+
         # Use tqdm for batch-level progress
         train_loop = tqdm(train_loader, desc=f"Training {model_name}", leave=False)
         for batch in train_loop:
@@ -102,11 +99,13 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
             loss.backward()
             optimizer.step()
 
+            # Calculate batch metrics for progress display only
             batch_loss = loss.item()
             batch_mae = F.l1_loss(output, target, reduction='mean').item()
 
-            train_loss += batch_loss * temporal_features.size(0)
-            train_mae += F.l1_loss(output, target, reduction='sum').item()
+            # Store outputs and targets for later computation
+            all_train_outputs.append(output.detach().cpu().numpy())
+            all_train_targets.append(target.detach().cpu().numpy())
 
             # Update the progress bar with current batch metrics
             train_loop.set_postfix(loss=batch_loss, mae=batch_mae)
@@ -114,6 +113,21 @@ def train_model(model, train_loader, val_loader, model_name="Model", epochs=50, 
             debug_counter += 1
             if debug_mode and debug_counter > 10:
                 break
+
+        # Compute training metrics using sklearn (same as validation)
+        all_train_outputs = np.vstack(all_train_outputs)
+        all_train_targets = np.vstack(all_train_targets)
+
+        # Calculate metrics using the same functions as in evaluate_model
+        if target_scaler is not None:
+            # Apply inverse transform to get predictions in original scale
+            all_train_outputs_orig = target_scaler.inverse_transform(all_train_outputs)
+            all_train_targets_orig = target_scaler.inverse_transform(all_train_targets)
+            train_loss = mean_squared_error(all_train_targets_orig, all_train_outputs_orig)
+            train_mae = mean_absolute_error(all_train_targets_orig, all_train_outputs_orig)
+        else:
+            train_loss = mean_squared_error(all_train_targets, all_train_outputs)
+            train_mae = mean_absolute_error(all_train_targets, all_train_outputs)
 
         # Validation phase - using evaluate_model
         # Note: evaluate_model handles model.eval() and torch.no_grad() internally

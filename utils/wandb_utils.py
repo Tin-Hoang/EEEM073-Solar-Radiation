@@ -11,6 +11,8 @@ import torch
 import wandb
 from functools import wraps
 
+from utils.model_utils import get_model_summary
+
 # Default settings
 USE_WANDB = False
 KEEP_RUN_OPEN = False
@@ -168,31 +170,37 @@ def track_experiment(func):
 
         # Start wandb run if tracking is enabled
         if USE_WANDB:
-            train_loader = kwargs.get('train_loader', None)
-            batch_size = train_loader.batch_size if train_loader else "None"
-            lookback = train_loader.dataset.lookback if train_loader else "None"
-            target_field = train_loader.dataset.target_field if train_loader else "None"
-            selected_features = train_loader.dataset.selected_features if train_loader else "None"
-            
+            train_config = kwargs.get('config', None)
+            temporal_features_shape = train_config.get('TEMPORAL_FEATURES_SHAPE', None)
+            static_features_shape = train_config.get('STATIC_FEATURES_SHAPE', None)
+            # Try to find the model - check common parameter names and args
+            model = kwargs.get('model', None)
+            # If model wasn't found in kwargs, check if it might be the first positional argument
+            if model is None and len(args) > 0:
+                model = args[0]
+
+            try:
+                model_summary = get_model_summary(model,
+                                                temporal_features_shape,
+                                                static_features_shape)
+                model_summary = repr(model_summary)
+            except:
+                model_summary = repr(model)
+            # Get model dictionary
+            try:
+                model_dict = dict(model.__dict__)
+            except:
+                model_dict = {}
             # Create config parameters from kwargs
             config = {
                 'model_name': model_name,
                 'epochs': kwargs.get('epochs', 50),
                 'patience': kwargs.get('patience', 10),
                 'learning_rate': kwargs.get('lr', 0.001),
-                'batch_size': batch_size,
-                'lookback': lookback,
-                'target_field': target_field,
-                'selected_features': selected_features
+                'config': train_config,
+                'model_architecture': model_summary,
+                'model_dict': model_dict
             }
-
-            # Add physics parameters if they exist
-            if 'lambda_night' in kwargs:
-                config.update({
-                    'lambda_night': kwargs.get('lambda_night'),
-                    'lambda_neg': kwargs.get('lambda_neg'),
-                    'lambda_clear': kwargs.get('lambda_clear'),
-                })
 
             # Create the run if it doesn't exist
             if wandb.run is None:
@@ -214,7 +222,6 @@ def track_experiment(func):
             else:
                 print(f"Using existing wandb run: {wandb.run.name}")
                 wrapper_created_run = False
-
             # Run the original function
             history = func(*args, **kwargs)
 
