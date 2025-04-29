@@ -363,6 +363,18 @@ def scale_feature(feature_data, feature_name):
         # Convert from int16 (degrees * 100) to float degrees
         # This is critical for correct nighttime_mask calculation
         return data.astype(float) / 100.0
+    elif feature_name in ['aod']:
+        # Convert from uint16 (DU * 1000) to float
+        return data.astype(float) / 1000.0
+    elif feature_name in ['cld_press_acha']:
+        # Convert from uint16 (10) to float
+        return data.astype(float) / 10.0
+    elif feature_name in ['cld_opd_dcomp', 'cld_reff_dcomp']:
+        # Convert from uint16 (100) to float
+        return data.astype(float) / 100.0
+    elif feature_name in ['dew_point']:
+        # Convert from int16 (°C * 10) to float
+        return data.astype(float) / 10.0
     else:
         # Default scaling for other features
         return data.astype(float)
