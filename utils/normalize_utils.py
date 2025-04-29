@@ -61,8 +61,15 @@ def normalize_data(data, selected_features, target_variable, scalers=None, fit_s
     elif scalers is None and not fit_scalers:
         raise ValueError("Must provide scalers when fit_scalers=False")
 
+    # Always include time_index if available (no normalization needed)
+    if 'time_index' in data:
+        normalized_data['time_index'] = data['time_index']
+
     # Process time features - these don't need scaling
     if 'timestamps' in data:
+        # Include "timestamps" as "time_index_local"
+        normalized_data['time_index_local'] = data['timestamps']
+        # Create time features (8 cyclical features)
         normalized_data['time_features'] = create_time_features(data['timestamps'])
     elif 'time_features' in data:
         # If already processed, just copy
@@ -173,6 +180,10 @@ def create_sequences(data, lookback=24, selected_features=None, target_variable=
     # Initialize seq_data with original data structure
     seq_data = {}
 
+    # Preserve time_index if available (shifted by lookback)
+    if 'time_index' in data:
+        seq_data['time_index'] = data['time_index'][lookback:]
+
     # Copy time features directly (shape will be n_timesteps-lookback, n_time_features)
     if 'time_features' in data:
         seq_data['time_features'] = data['time_features'][lookback:, :]
@@ -239,6 +250,12 @@ def apply_scalers(data, scalers, selected_features=None, target_variable=None, i
     all_features = list(selected_features)
     if target_variable is not None and target_variable not in all_features:
         all_features.append(target_variable)
+
+    # Preserve time_index without transformation
+    if 'time_index' in data:
+        transformed_data['time_index'] = data['time_index']
+    if 'timestamps' in data:
+        transformed_data['timestamps'] = data['timestamps']
 
     # Process coordinates if available
     if 'coordinates' in data and 'coord_scaler' in scalers:
