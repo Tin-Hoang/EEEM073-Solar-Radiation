@@ -53,6 +53,8 @@ def train_model(
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6
     )
+    if config is not None:
+        print(f"Training config: {config}")
 
     history = {'train_loss': [], 'val_loss': [], 'train_mae': [], 'val_mae': []}
     best_val_loss = float('inf')

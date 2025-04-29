@@ -8,7 +8,7 @@ import os
 class TimeSeriesDataset(Dataset):
     def __init__(self, preprocessed_data_path=None, seq_data=None, targets=None,
                  lazy_loading=False, dtype=torch.float32, lookback=24,
-                 target_field='ghi', time_key='time_features', selected_features=None,
+                 target_field='ghi', time_feature_key='time_features', selected_features=None,
                  include_target_history=True):
         """
         Dataset for time series forecasting with memory optimization and customizable field names.
@@ -29,12 +29,12 @@ class TimeSeriesDataset(Dataset):
                               If None, all available features are used.
             include_target_history: Whether to include past values of target field(s) for autoregressive
                                    modeling (default: True)
-            time_key: Name of the key that contains time features in seq_data (default: 'time_features')
+            time_feature_key: Name of the key that contains time features in seq_data (default: 'time_features')
         """
         self.lazy_loading = lazy_loading
         self.dtype = dtype
         self.lookback = lookback
-        self.time_key = time_key
+        self.time_feature_key = time_feature_key
 
         # Handle single target field or multiple target fields
         self.target_field = target_field
@@ -71,7 +71,7 @@ class TimeSeriesDataset(Dataset):
             self._filtered_seq_data = {}
 
             # Always include certain core features
-            core_features = ['coordinates', 'elevation', self.time_key]
+            core_features = ['coordinates', 'elevation', self.time_feature_key]
 
             # Always include the target field(s) in the data
             for field in self.target_fields:
@@ -188,8 +188,8 @@ class TimeSeriesDataset(Dataset):
         # If we couldn't infer from time series, try other approaches
         if not hasattr(self, 'n_timesteps') or not hasattr(self, 'n_locations'):
             # Try to infer from time_features
-            if self.time_key in self._seq_data:
-                self.n_timesteps = self._seq_data[self.time_key].shape[0]
+            if self.time_feature_key in self._seq_data:
+                self.n_timesteps = self._seq_data[self.time_feature_key].shape[0]
 
             # Try to infer from coordinates
             if 'coordinates' in self._seq_data:
@@ -254,7 +254,7 @@ class TimeSeriesDataset(Dataset):
             shape = value.shape
 
             # Special case for time_features
-            if key == self.time_key and len(shape) == 2:
+            if key == self.time_feature_key and len(shape) == 2:
                 # time_features with shape (time, features)
                 self.temporal_feature_keys.append(key)
             # Coordinates with shape (locations, features)
@@ -265,7 +265,7 @@ class TimeSeriesDataset(Dataset):
                 self.static_feature_keys.append(key)
             # Time series data with shape (time, locations)
             elif len(shape) == 2 and (
-                key not in [self.time_key, 'coordinates', 'elevation']
+                key not in [self.time_feature_key, 'coordinates', 'elevation']
             ):
                 self.time_series_keys.append(key)
             # Traditional 3D temporal features (samples, timesteps, features)
@@ -306,8 +306,15 @@ class TimeSeriesDataset(Dataset):
             # Process all features in seq_data
             for key, value in self._seq_data.items():
                 if isinstance(value, np.ndarray):
-                    # Default tensor conversion
-                    self.tensors[key] = torch.tensor(value, dtype=self.dtype)
+                    # Handle numpy.bytes_ arrays by converting to strings
+                    if value.dtype.type == np.bytes_:
+                        # Convert bytes to strings
+                        string_array = np.array([s.decode('utf-8') for s in value.flatten()]).reshape(value.shape)
+                        # Store as Python list instead of tensor
+                        self.tensors[key] = string_array
+                    else:
+                        # Default tensor conversion for supported numeric types
+                        self.tensors[key] = torch.tensor(value, dtype=self.dtype)
 
             # Convert targets to tensor
             self._get_targets()
@@ -343,9 +350,9 @@ class TimeSeriesDataset(Dataset):
             temporal_tensors = []
 
             # Process time_features if available (shape: time, features)
-            if self.time_key in self.tensors and self.tensors[self.time_key] is not None:
+            if self.time_feature_key in self.tensors and self.tensors[self.time_feature_key] is not None:
                 # Get time features tensor
-                time_features = self.tensors[self.time_key]
+                time_features = self.tensors[self.time_feature_key]
                 # For 2D time features (time, features), we need to expand it with locations
                 # to match the dimensionality of other time series features
                 if len(time_features.shape) == 2:
@@ -437,10 +444,17 @@ class TimeSeriesDataset(Dataset):
     def _get_targets(self, idx=None):
         """Get or create targets tensor"""
         if self.targets_tensor is None:
-            # Convert targets to tensor
-            self.targets_tensor = torch.tensor(self._targets, dtype=self.dtype)
-            if len(self.targets_tensor.shape) == 1:
-                self.targets_tensor = self.targets_tensor.unsqueeze(1)
+            # Check if targets are numpy.bytes_ type
+            if isinstance(self._targets, np.ndarray) and self._targets.dtype.type == np.bytes_:
+                # Convert bytes to strings
+                string_array = np.array([s.decode('utf-8') for s in self._targets.flatten()]).reshape(self._targets.shape)
+                # Store as Python list instead of tensor
+                self.targets_tensor = string_array
+            else:
+                # Convert targets to tensor
+                self.targets_tensor = torch.tensor(self._targets, dtype=self.dtype)
+                if len(self.targets_tensor.shape) == 1:
+                    self.targets_tensor = self.targets_tensor.unsqueeze(1)
 
         if idx is not None:
             return self.targets_tensor[idx]
@@ -502,10 +516,25 @@ class TimeSeriesDataset(Dataset):
 
         if not self.lazy_loading:
             # All tensors already created upfront
-            result = {
-                'static_features': self.static_features[loc_idx] if self.static_features is not None else None,
-                'target': self.targets_tensor[time_idx, loc_idx] if len(self.targets_tensor.shape) > 1 else self.targets_tensor[loc_idx]
-            }
+            result = {}
+
+            # Add static features
+            if self.static_features is not None:
+                result['static_features'] = self.static_features[loc_idx]
+
+            # Add target
+            if isinstance(self.targets_tensor, (list, np.ndarray)) and not isinstance(self.targets_tensor, torch.Tensor):
+                # Handle string arrays
+                if len(np.array(self.targets_tensor).shape) > 1:
+                    result['target'] = self.targets_tensor[time_idx][loc_idx]
+                else:
+                    result['target'] = self.targets_tensor[loc_idx]
+            else:
+                # Handle tensor targets
+                if len(self.targets_tensor.shape) > 1:
+                    result['target'] = self.targets_tensor[time_idx, loc_idx]
+                else:
+                    result['target'] = self.targets_tensor[loc_idx]
 
             # Add temporal features (with lookback window if applicable)
             if self.temporal_features is not None:
@@ -576,13 +605,35 @@ class TimeSeriesDataset(Dataset):
             # Add time series features (all shape time, locations)
             for key in self.time_series_keys:
                 if key in self.tensors:
-                    # Non-target fields are included as separate entries for easier model access
-                    if self.lookback > 0:
-                        # Get sequence window
-                        result[key] = self.tensors[key][window_start:time_idx, loc_idx]
+                    # Check if tensor is a string array
+                    if isinstance(self.tensors[key], (list, np.ndarray)) and not isinstance(self.tensors[key], torch.Tensor):
+                        # Handle string arrays
+                        if self.lookback > 0:
+                            # Get sequence window
+                            string_data = self.tensors[key][window_start:time_idx]
+                            if len(np.array(string_data).shape) > 1:
+                                result[key] = [row[loc_idx] for row in string_data]
+                            else:
+                                result[key] = string_data
+                        else:
+                            # Get single timestep
+                            if len(np.array(self.tensors[key]).shape) > 1:
+                                result[key] = self.tensors[key][time_idx][loc_idx]
+                            else:
+                                result[key] = self.tensors[key][time_idx]
                     else:
-                        # Get single timestep
-                        result[key] = self.tensors[key][time_idx, loc_idx]
+                        # Non-target fields are included as separate entries for easier model access
+                        if self.lookback > 0:
+                            # Get sequence window
+                            result[key] = self.tensors[key][window_start:time_idx, loc_idx]
+                        else:
+                            # Get single timestep
+                            result[key] = self.tensors[key][time_idx, loc_idx]
+
+            # Add time_index_local (timestamp as string)
+            if 'time_index_local' in self.tensors:
+                # Add the timestamp for the current time_idx
+                result['time_index_local'] = self.tensors['time_index_local'][time_idx]
 
             # Add nighttime field
             if 'nighttime_mask' in self.tensors:
@@ -630,18 +681,18 @@ class TimeSeriesDataset(Dataset):
             temporal_features_list = []
 
             # Add time features
-            if self.time_key in self._seq_data:
+            if self.time_feature_key in self._seq_data:
                 if self.lookback > 0:
                     # Get sequence window
                     time_features = torch.tensor(
-                        self._seq_data[self.time_key][window_start:time_idx],
+                        self._seq_data[self.time_feature_key][window_start:time_idx],
                         dtype=self.dtype
                     )
                     temporal_features_list.append(time_features)
                 else:
                     # Get single timestep
                     time_features = torch.tensor(
-                        self._seq_data[self.time_key][time_idx],
+                        self._seq_data[self.time_feature_key][time_idx],
                         dtype=self.dtype
                     )
                     temporal_features_list.append(time_features)
@@ -657,6 +708,16 @@ class TimeSeriesDataset(Dataset):
                         # Get single timestep for this location
                         feature_val = self._seq_data[key][time_idx, loc_idx]
                     result[key] = torch.tensor(feature_val, dtype=self.dtype)
+
+            # Add time_index_local (timestamp as string)
+            if 'time_index_local' in self._seq_data:
+                # Check if it's bytes data
+                if isinstance(self._seq_data['time_index_local'], np.ndarray) and self._seq_data['time_index_local'].dtype.type == np.bytes_:
+                    # Convert from bytes to string
+                    result['time_index_local'] = self._seq_data['time_index_local'][time_idx].decode('utf-8')
+                else:
+                    # Already a string or other format
+                    result['time_index_local'] = self._seq_data['time_index_local'][time_idx]
 
             # Add target history for autoregressive modeling
             if self.include_target_history and self.lookback > 0:
@@ -728,7 +789,7 @@ class TimeSeriesDataset(Dataset):
     @classmethod
     def from_file(cls, filepath, lazy_loading=False, dtype=torch.float32,
                  lookback=24, target_field='ghi', selected_features=None,
-                 include_target_history=True, time_key='time_features'):
+                 include_target_history=True, time_feature_key='time_features'):
         """
         Create dataset directly from a saved file
 
@@ -742,7 +803,7 @@ class TimeSeriesDataset(Dataset):
             target_field: Name of the field to use as target (default: 'ghi')
             selected_features: List of feature names to include in the prediction input
             include_target_history: Whether to include past values of target field(s) (default: True)
-            time_key: Name of the key that contains time features in the data (default: 'time_features')
+            time_feature_key: Name of the key that contains time features in the data (default: 'time_features')
 
         Returns:
             dataset: TimeSeriesDataset instance
@@ -755,7 +816,7 @@ class TimeSeriesDataset(Dataset):
             target_field=target_field,
             selected_features=selected_features,
             include_target_history=include_target_history,
-            time_key=time_key
+            time_feature_key=time_feature_key
         )
 
     def _estimate_memory_usage(self):
@@ -782,11 +843,18 @@ class TimeSeriesDataset(Dataset):
         """Get tensor if already created, or create it on demand"""
         if self.tensors[key] is None:
             if key in self._seq_data:
-                # Convert to tensor
-                tensor = torch.tensor(self._seq_data[key], dtype=self.dtype)
-                if unsqueeze_dim is not None:
-                    tensor = tensor.unsqueeze(unsqueeze_dim)
-                self.tensors[key] = tensor
+                # Check if data is numpy.bytes_ type
+                if isinstance(self._seq_data[key], np.ndarray) and self._seq_data[key].dtype.type == np.bytes_:
+                    # Convert bytes to strings
+                    string_array = np.array([s.decode('utf-8') for s in self._seq_data[key].flatten()]).reshape(self._seq_data[key].shape)
+                    # Store as Python list instead of tensor
+                    self.tensors[key] = string_array
+                else:
+                    # Convert to tensor
+                    tensor = torch.tensor(self._seq_data[key], dtype=self.dtype)
+                    if unsqueeze_dim is not None:
+                        tensor = tensor.unsqueeze(unsqueeze_dim)
+                    self.tensors[key] = tensor
             else:
                 raise KeyError(f"Key {key} not found in seq_data")
 
