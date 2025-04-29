@@ -67,8 +67,10 @@ def normalize_data(data, selected_features, target_variable, scalers=None, fit_s
 
     # Process time features - these don't need scaling
     if 'timestamps' in data:
-        # Include "timestamps" as "time_index_local"
-        normalized_data['time_index_local'] = data['timestamps']
+        # Convert timestamps to a storable format (ISO strings)
+        # This ensures we don't get TypeError when saving to HDF5
+        normalized_data['time_index_local'] = np.array([ts.isoformat() for ts in data['timestamps']], dtype='S')
+
         # Create time features (8 cyclical features)
         normalized_data['time_features'] = create_time_features(data['timestamps'])
     elif 'time_features' in data:
@@ -254,8 +256,11 @@ def apply_scalers(data, scalers, selected_features=None, target_variable=None, i
     # Preserve time_index without transformation
     if 'time_index' in data:
         transformed_data['time_index'] = data['time_index']
+
+    # Handle timestamps if available
     if 'timestamps' in data:
-        transformed_data['timestamps'] = data['timestamps']
+        # Convert to storable format (ISO strings)
+        transformed_data['timestamps'] = np.array([ts.isoformat() for ts in data['timestamps']], dtype='S')
 
     # Process coordinates if available
     if 'coordinates' in data and 'coord_scaler' in scalers:
