@@ -86,14 +86,14 @@ TARGET_VARIABLE = 'ghi'
 # %%
 from utils.data_persistence import load_normalized_data
 
-TRAIN_PREPROCESSED_DATA_PATH = "data/processed/train_normalized_20250429_030849.h5"
-VAL_PREPROCESSED_DATA_PATH = "data/processed/val_normalized_20250429_030857.h5"
-TEST_PREPROCESSED_DATA_PATH = "data/processed/test_normalized_20250429_030858.h5"
+TRAIN_PREPROCESSED_DATA_PATH = "data/processed/train_normalized_20250430_050932.h5"
+VAL_PREPROCESSED_DATA_PATH = "data/processed/val_normalized_20250430_050940.h5"
+TEST_PREPROCESSED_DATA_PATH = "data/processed/test_normalized_20250430_050941.h5"
 
 # Load sequences
 train_data, metadata = load_normalized_data(TRAIN_PREPROCESSED_DATA_PATH)
 
-SCALER_PATH = "data/processed/scalers_20250429_030858.pkl"
+SCALER_PATH = "data/processed/scalers_20250430_050941.pkl"
 scalers = load_scalers(SCALER_PATH)
 
 # Print metadata
@@ -122,19 +122,18 @@ train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, nu
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
 
+
+# %%
+# Get a batch to determine input dimensions
+batch = next(iter(train_loader))
+
 # Check sample batch
-print("="*100)
 sample_batch = next(iter(train_loader))
 for key, value in sample_batch.items():
     if isinstance(value, torch.Tensor):
         print(f"{key} shape: {value.shape}")
     elif isinstance(value, list):
         print(f"{key} length: {len(value)}")
-
-
-# %%
-# Get a batch to determine input dimensions
-batch = next(iter(train_loader))
 
 # Extract dimensions from a batch (more reliable)
 temporal_features = batch['temporal_features']
@@ -215,9 +214,9 @@ def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_
             epochs=epochs,
             patience=patience,
             lr=lr,
+            target_scaler=scalers[f'{TARGET_VARIABLE}_scaler'],
+            config=CONFIG,
             debug_mode=DEBUG_MODE,
-            target_scaler=scalers[TARGET_VARIABLE],
-            config=CONFIG
         )
         training_plot = plot_training_history(history, model_name=model_name)
 
@@ -262,8 +261,9 @@ def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_
                 }
             },
             temporal_features=SELECTED_FEATURES,
-            static_features=["location_id"],  # Assuming static features contain location_id
+            static_features=['coordinates', 'elevation'],
             target_field=TARGET_VARIABLE,
+            time_feature_keys=TIME_KEY,
             config=CONFIG
         )
 
@@ -285,7 +285,6 @@ def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_
         torch.cuda.empty_cache()
 
     return history, val_metrics, test_metrics
-
 
 # %% [markdown]
 # # 3. Model Experiments
@@ -515,9 +514,9 @@ def plot_predictions_over_time(models, model_names, data_loader, target_scaler, 
         all_static.append(batch['static_features'])
         all_targets.append(batch['target'])
         # Check if nighttime data is available
-        if 'nighttime' in batch:
+        if 'nighttime_mask' in batch:
             has_nighttime = True
-            all_nighttime.append(batch['nighttime'])
+            all_nighttime.append(batch['nighttime_mask'])
         # Check if time_index_local is available
         if 'time_index_local' in batch:
             has_time_index_local = True

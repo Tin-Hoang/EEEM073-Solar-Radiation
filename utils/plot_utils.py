@@ -321,13 +321,14 @@ def plot_solar_day_night(data, location_idx=0, n_steps=None, start_idx=0, show_t
     return fig
 
 
-def plot_time_features(timestamps, time_features, n_days=7):
+def plot_time_features(timestamps, time_features=None, n_days=7):
     """
     Visualize time features created by create_time_features
 
     Args:
         timestamps: Array of datetime objects
-        time_features: Optional pre-computed time features. If None, will be generated using create_time_features
+        time_features: Optional pre-computed time features. If None, will be generated using create_time_features.
+                      Can be either a dictionary of individual features or a combined array
         n_days: Number of days to plot (default: 7)
 
     Returns:
@@ -336,14 +337,38 @@ def plot_time_features(timestamps, time_features, n_days=7):
     # Limit to n_days
     if len(timestamps) > 24 * n_days:
         timestamps = timestamps[:24 * n_days]
-        if time_features is not None:
-            time_features = time_features[:24 * n_days]
 
-    # Extract components
-    hour_sin, hour_cos = time_features[:, 0], time_features[:, 1]
-    day_sin, day_cos = time_features[:, 2], time_features[:, 3]
-    month_sin, month_cos = time_features[:, 4], time_features[:, 5]
-    dow_sin, dow_cos = time_features[:, 6], time_features[:, 7]
+    # Handle time_features format
+    if time_features is not None:
+        if isinstance(time_features, dict):
+            # Dictionary format (new)
+            hour_sin = time_features['hour_sin'][:24 * n_days] if 'hour_sin' in time_features else None
+            hour_cos = time_features['hour_cos'][:24 * n_days] if 'hour_cos' in time_features else None
+            day_sin = time_features['day_sin'][:24 * n_days] if 'day_sin' in time_features else None
+            day_cos = time_features['day_cos'][:24 * n_days] if 'day_cos' in time_features else None
+            month_sin = time_features['month_sin'][:24 * n_days] if 'month_sin' in time_features else None
+            month_cos = time_features['month_cos'][:24 * n_days] if 'month_cos' in time_features else None
+            dow_sin = time_features['dow_sin'][:24 * n_days] if 'dow_sin' in time_features else None
+            dow_cos = time_features['dow_cos'][:24 * n_days] if 'dow_cos' in time_features else None
+        else:
+            # Array format (old)
+            time_features = time_features[:24 * n_days]
+            hour_sin, hour_cos = time_features[:, 0], time_features[:, 1]
+            day_sin, day_cos = time_features[:, 2], time_features[:, 3]
+            month_sin, month_cos = time_features[:, 4], time_features[:, 5]
+            dow_sin, dow_cos = time_features[:, 6], time_features[:, 7]
+    else:
+        # Generate time features from timestamps
+        from utils.normalize_utils import create_time_features
+        time_features_dict = create_time_features(timestamps)
+        hour_sin = time_features_dict['hour_sin']
+        hour_cos = time_features_dict['hour_cos']
+        day_sin = time_features_dict['day_sin']
+        day_cos = time_features_dict['day_cos']
+        month_sin = time_features_dict['month_sin']
+        month_cos = time_features_dict['month_cos']
+        dow_sin = time_features_dict['dow_sin']
+        dow_cos = time_features_dict['dow_cos']
 
     # Create figure
     fig, axs = plt.subplots(4, 2, figsize=(15, 12), sharex=True)
@@ -399,25 +424,79 @@ def plot_training_history(history, model_name=""):
         history: Dictionary of training history
         model_name: Name of the model for the plot title
     """
-    fig = plt.figure(figsize=(12, 5))
+    # Check if sample counts are available
+    has_sample_counts = 'train_samples' in history and 'val_samples' in history
 
-    plt.subplot(1, 2, 1)
-    plt.plot(history['train_loss'], label='Train')
-    plt.plot(history['val_loss'], label='Validation')
-    plt.title(f'{model_name} - Loss (MSE)')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.grid(True)
+    if has_sample_counts:
+        # Create a 2x2 figure for total and average metrics
+        fig = plt.figure(figsize=(16, 12))
 
-    plt.subplot(1, 2, 2)
-    plt.plot(history['train_mae'], label='Train')
-    plt.plot(history['val_mae'], label='Validation')
-    plt.title(f'{model_name} - MAE')
-    plt.xlabel('Epoch')
-    plt.ylabel('MAE')
-    plt.legend()
-    plt.grid(True)
+        # Total Loss (MSE)
+        plt.subplot(2, 2, 1)
+        plt.plot(history['train_loss'], label='Train')
+        plt.plot(history['val_loss'], label='Validation')
+        plt.title(f'{model_name} - Total Loss (MSE)')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.grid(True)
+
+        # Average Loss per sample
+        plt.subplot(2, 2, 2)
+        # Calculate average loss per sample
+        train_avg_loss = [loss/samples for loss, samples in zip(history['train_loss'], history['train_samples'])]
+        val_avg_loss = [loss/samples for loss, samples in zip(history['val_loss'], history['val_samples'])]
+        plt.plot(train_avg_loss, label='Train')
+        plt.plot(val_avg_loss, label='Validation')
+        plt.title(f'{model_name} - Average Loss per Sample')
+        plt.xlabel('Epoch')
+        plt.ylabel('Avg Loss per Sample')
+        plt.legend()
+        plt.grid(True)
+
+        # Total MAE
+        plt.subplot(2, 2, 3)
+        plt.plot(history['train_mae'], label='Train')
+        plt.plot(history['val_mae'], label='Validation')
+        plt.title(f'{model_name} - Total MAE')
+        plt.xlabel('Epoch')
+        plt.ylabel('MAE')
+        plt.legend()
+        plt.grid(True)
+
+        # Average MAE per sample
+        plt.subplot(2, 2, 4)
+        # Calculate average MAE per sample
+        train_avg_mae = [mae/samples for mae, samples in zip(history['train_mae'], history['train_samples'])]
+        val_avg_mae = [mae/samples for mae, samples in zip(history['val_mae'], history['val_samples'])]
+        plt.plot(train_avg_mae, label='Train')
+        plt.plot(val_avg_mae, label='Validation')
+        plt.title(f'{model_name} - Average MAE per Sample')
+        plt.xlabel('Epoch')
+        plt.ylabel('Avg MAE per Sample')
+        plt.legend()
+        plt.grid(True)
+    else:
+        # Original 1x2 figure if sample counts aren't available
+        fig = plt.figure(figsize=(12, 5))
+
+        plt.subplot(1, 2, 1)
+        plt.plot(history['train_loss'], label='Train')
+        plt.plot(history['val_loss'], label='Validation')
+        plt.title(f'{model_name} - Loss (MSE)')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.grid(True)
+
+        plt.subplot(1, 2, 2)
+        plt.plot(history['train_mae'], label='Train')
+        plt.plot(history['val_mae'], label='Validation')
+        plt.title(f'{model_name} - MAE')
+        plt.xlabel('Epoch')
+        plt.ylabel('MAE')
+        plt.legend()
+        plt.grid(True)
 
     plt.tight_layout()
     plt.show()
@@ -439,10 +518,9 @@ def plot_evaluation_metrics(metrics, model_name=''):
     y_pred = metrics['y_pred']
 
     # Check if we have meaningful nighttime data (any non-zero values)
-    has_nighttime = metrics['nighttime'] is not None and np.any(metrics['nighttime'] > 0.5)
-
+    has_nighttime = metrics['nighttime_mask'] is not None and np.any(metrics['nighttime_mask'] > 0.5)
     if has_nighttime:
-        nighttime = metrics['nighttime'].flatten() > 0.5
+        nighttime = metrics['nighttime_mask'].flatten() > 0.5
     else:
         # Create all daytime mask
         nighttime = np.zeros(len(y_true), dtype=bool)
@@ -1190,9 +1268,9 @@ def plot_predictions_over_time(models, model_names, data_loader, target_scaler, 
         all_static.append(batch['static_features'])
         all_targets.append(batch['target'])
         # Check if nighttime data is available
-        if 'nighttime' in batch:
+        if 'nighttime_mask' in batch:
             has_nighttime = True
-            all_nighttime.append(batch['nighttime'])
+            all_nighttime.append(batch['nighttime_mask'])
         # Check if time_index_local is available
         if 'time_index_local' in batch:
             has_time_index_local = True
