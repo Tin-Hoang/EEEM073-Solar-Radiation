@@ -89,47 +89,64 @@ def normalize_data(data, selected_features, target_variable, scalers=None, fit_s
             if key in data:
                 normalized_data[key] = data[key]
 
-    # Process coordinates
+    # Process latitude and longitude
     if 'latitude' in data and 'longitude' in data:
-        # We need to scale coordinates
-        coords = np.column_stack([data['latitude'], data['longitude']])
-
+        # Scale latitude and longitude separately
         if fit_scalers:
-            # Create and fit scaler for coordinates
-            coord_scaler = MinMaxScaler()
-            coord_scaler.fit(coords)
-            scalers['coord_scaler'] = coord_scaler
+            # Create and fit scalers for latitude and longitude
+            latitude_scaler = MinMaxScaler()
+            longitude_scaler = MinMaxScaler()
+            lat_data = data['latitude'].reshape(-1, 1)
+            lon_data = data['longitude'].reshape(-1, 1)
+            latitude_scaler.fit(lat_data)
+            longitude_scaler.fit(lon_data)
+            scalers['latitude_scaler'] = latitude_scaler
+            scalers['longitude_scaler'] = longitude_scaler
         else:
-            # Use existing scaler
-            coord_scaler = scalers['coord_scaler']
+            # Use existing scalers
+            latitude_scaler = scalers['latitude_scaler']
+            longitude_scaler = scalers['longitude_scaler']
 
-        # Transform coordinates
-        normalized_data['coordinates'] = coord_scaler.transform(coords)
+        # Transform latitude and longitude
+        lat_data = data['latitude'].reshape(-1, 1)
+        lon_data = data['longitude'].reshape(-1, 1)
+        normalized_data['latitude'] = latitude_scaler.transform(lat_data).reshape(data['latitude'].shape)
+        normalized_data['longitude'] = longitude_scaler.transform(lon_data).reshape(data['longitude'].shape)
 
     elif 'coordinates' in data:
-        # If coordinates are already present, apply scaling
+        # Legacy support - split coordinates into latitude and longitude
         if fit_scalers:
-            coord_scaler = MinMaxScaler()
-            coord_scaler.fit(data['coordinates'])
-            scalers['coord_scaler'] = coord_scaler
+            latitude_scaler = MinMaxScaler()
+            longitude_scaler = MinMaxScaler()
+            lat_data = data['coordinates'][:, 0].reshape(-1, 1)
+            lon_data = data['coordinates'][:, 1].reshape(-1, 1)
+            latitude_scaler.fit(lat_data)
+            longitude_scaler.fit(lon_data)
+            scalers['latitude_scaler'] = latitude_scaler
+            scalers['longitude_scaler'] = longitude_scaler
         else:
-            coord_scaler = scalers['coord_scaler']
+            latitude_scaler = scalers['latitude_scaler']
+            longitude_scaler = scalers['longitude_scaler']
 
-        normalized_data['coordinates'] = coord_scaler.transform(data['coordinates'])
+        # Transform and split coordinates
+        lat_data = data['coordinates'][:, 0].reshape(-1, 1)
+        lon_data = data['coordinates'][:, 1].reshape(-1, 1)
+        normalized_data['latitude'] = latitude_scaler.transform(lat_data).reshape(-1)
+        normalized_data['longitude'] = longitude_scaler.transform(lon_data).reshape(-1)
 
     # Process elevation
     if 'elevation' in data:
         if fit_scalers:
-            elev_scaler = StandardScaler()
+            elevation_scaler = StandardScaler()
             elev_data = data['elevation'].reshape(-1, 1)
-            elev_scaler.fit(elev_data)
-            scalers['elev_scaler'] = elev_scaler
+            elevation_scaler.fit(elev_data)
+            scalers['elevation_scaler'] = elevation_scaler
         else:
-            elev_scaler = scalers['elev_scaler']
+            elevation_scaler = scalers['elevation_scaler']
 
         # Transform elevation and reshape back to original shape
         elev_data = data['elevation'].reshape(-1, 1)
-        normalized_data['elevation'] = elev_scaler.transform(elev_data).reshape(data['elevation'].shape)
+        normalized_data['elevation'] = elevation_scaler.transform(elev_data).reshape(data['elevation'].shape)
 
     # Copy nighttime mask without normalization
     if 'nighttime_mask' in data:
@@ -143,6 +160,10 @@ def normalize_data(data, selected_features, target_variable, scalers=None, fit_s
     for feature in all_features:
         if feature not in data:
             print(f"Warning: Feature {feature} not found in data")
+            continue
+
+        # Skip features that have already been processed
+        if feature in normalized_data:
             continue
 
         # Create or use existing scaler
@@ -177,8 +198,8 @@ def create_sequences(data, lookback=24, selected_features=None, target_variable=
         seq_targets: Target GHI values
     """
     # Determine number of locations
-    if 'coordinates' in data:
-        n_locations = data['coordinates'].shape[0]
+    if 'latitude' in data:
+        n_locations = data['latitude'].shape[0]
     else:
         n_locations = data[selected_features[0]].shape[1]
 
@@ -205,9 +226,11 @@ def create_sequences(data, lookback=24, selected_features=None, target_variable=
         if key in data:
             seq_data[key] = data[key][lookback:]
 
-    # Copy coordinates directly (shape will be n_locations, 2)
-    if 'coordinates' in data:
-        seq_data['coordinates'] = data['coordinates']
+    # Copy latitude and longitude directly (shape will be n_locations)
+    if 'latitude' in data:
+        seq_data['latitude'] = data['latitude']
+    if 'longitude' in data:
+        seq_data['longitude'] = data['longitude']
 
     # Copy elevation directly (shape will be n_locations)
     if 'elevation' in data:
@@ -215,7 +238,7 @@ def create_sequences(data, lookback=24, selected_features=None, target_variable=
 
     # Copy all time series features with shape (time, locations)
     for feature in selected_features:
-        if feature in data and feature not in ['coordinates', 'elevation'] and feature not in time_feature_keys:
+        if feature in data and feature not in ['latitude', 'longitude', 'elevation'] and feature not in time_feature_keys:
             # Keep the original structure but shift by lookback
             seq_data[feature] = data[feature][lookback:, :]
 
@@ -258,7 +281,7 @@ def apply_scalers(data, scalers, selected_features=None, target_variable=None, i
     if selected_features is None:
         selected_features = []
         for key in scalers.keys():
-            if key.endswith('_scaler') and not key.startswith('coord') and not key.startswith('elev'):
+            if key.endswith('_scaler') and key not in ['latitude_scaler', 'longitude_scaler', 'elevation_scaler']:
                 feature = key[:-7]  # Remove '_scaler' suffix
                 if feature != target_variable:
                     selected_features.append(feature)
@@ -277,44 +300,54 @@ def apply_scalers(data, scalers, selected_features=None, target_variable=None, i
         # Convert to storable format (ISO strings)
         transformed_data['timestamps'] = np.array([ts.isoformat() for ts in data['timestamps']], dtype='S')
 
-    # Process coordinates if available
-    if 'coordinates' in data and 'coord_scaler' in scalers:
+    # Process latitude and longitude if available
+    if 'latitude' in data and 'latitude_scaler' in scalers:
+        lat_data = data['latitude'].reshape(-1, 1)
         if inverse:
-            transformed_data['coordinates'] = scalers['coord_scaler'].inverse_transform(data['coordinates'])
+            transformed_data['latitude'] = scalers['latitude_scaler'].inverse_transform(lat_data).reshape(data['latitude'].shape)
         else:
-            transformed_data['coordinates'] = scalers['coord_scaler'].transform(data['coordinates'])
+            transformed_data['latitude'] = scalers['latitude_scaler'].transform(lat_data).reshape(data['latitude'].shape)
+
+    if 'longitude' in data and 'longitude_scaler' in scalers:
+        lon_data = data['longitude'].reshape(-1, 1)
+        if inverse:
+            transformed_data['longitude'] = scalers['longitude_scaler'].inverse_transform(lon_data).reshape(data['longitude'].shape)
+        else:
+            transformed_data['longitude'] = scalers['longitude_scaler'].transform(lon_data).reshape(data['longitude'].shape)
 
     # Process elevation if available
-    if 'elevation' in data and 'elev_scaler' in scalers:
+    if 'elevation' in data and 'elevation_scaler' in scalers:
         elev_data = data['elevation'].reshape(-1, 1)
         if inverse:
-            transformed_data['elevation'] = scalers['elev_scaler'].inverse_transform(elev_data).reshape(data['elevation'].shape)
+            transformed_data['elevation'] = scalers['elevation_scaler'].inverse_transform(elev_data).reshape(data['elevation'].shape)
         else:
-            transformed_data['elevation'] = scalers['elev_scaler'].transform(elev_data).reshape(data['elevation'].shape)
-
-    # Process time features (pass through without scaling)
-    if 'time_features' in data:
-        transformed_data['time_features'] = data['time_features']
-
-    # Process nighttime mask (pass through without scaling)
-    if 'nighttime_mask' in data:
-        transformed_data['nighttime_mask'] = data['nighttime_mask']
+            transformed_data['elevation'] = scalers['elevation_scaler'].transform(elev_data).reshape(data['elevation'].shape)
 
     # Process all features
     for feature in all_features:
-        if feature in data and f'{feature}_scaler' in scalers:
-            scaler = scalers[f'{feature}_scaler']
-            # Reshape data to 2D for scaler
-            original_shape = data[feature].shape
-            reshaped_data = data[feature].reshape(-1, 1)
+        if feature not in data:
+            print(f"Warning: Feature {feature} not found in data")
+            continue
 
-            # Transform or inverse transform
-            if inverse:
-                transformed = scaler.inverse_transform(reshaped_data)
-            else:
-                transformed = scaler.transform(reshaped_data)
+        # Skip features that have already been processed
+        if feature in transformed_data:
+            continue
 
-            # Reshape back to original shape
-            transformed_data[feature] = transformed.reshape(original_shape)
+        # Skip latitude, longitude, and elevation as they are handled separately
+        if feature in ['latitude', 'longitude', 'elevation']:
+            continue
+
+        scaler_key = f'{feature}_scaler'
+        if scaler_key not in scalers:
+            print(f"Warning: No scaler found for feature {feature}")
+            continue
+
+        # Transform and reshape data
+        reshaped_data = data[feature].reshape(-1, 1)
+        if inverse:
+            transformed = scalers[scaler_key].inverse_transform(reshaped_data)
+        else:
+            transformed = scalers[scaler_key].transform(reshaped_data)
+        transformed_data[feature] = transformed.reshape(data[feature].shape)
 
     return transformed_data

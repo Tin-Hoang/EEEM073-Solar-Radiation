@@ -160,7 +160,7 @@ def plot_time_series(data, location_idx=0, title=None, features=None, target_var
 
 def plot_solar_day_night(data, location_idx=0, n_steps=None, start_idx=0, show_threshold=True):
     """
-    Plot solar zenith angle and nighttime mask to verify day/night detection
+    Plot solar zenith angle, nighttime mask, and GHI to verify day/night detection and solar radiation patterns
 
     Args:
         data: Data dictionary
@@ -185,6 +185,12 @@ def plot_solar_day_night(data, location_idx=0, n_steps=None, start_idx=0, show_t
         print("Timestamps not found in data.")
         return None
 
+    if 'ghi' not in data:
+        print("GHI data not found. Will plot without GHI.")
+        has_ghi = False
+    else:
+        has_ghi = True
+
     # Get timestamps and determine range to display
     timestamps = data['timestamps']
     total_timesteps = len(timestamps)
@@ -205,6 +211,14 @@ def plot_solar_day_night(data, location_idx=0, n_steps=None, start_idx=0, show_t
     # Get solar zenith angle and nighttime mask data
     solar_zenith = data['solar_zenith_angle'][time_slice, location_idx].copy()
     nighttime = data['nighttime_mask'][time_slice, location_idx].copy()
+
+    # Get GHI data if available
+    if has_ghi:
+        ghi_data = data['ghi'][time_slice, location_idx].copy()
+        # Check if GHI needs scaling (common in datasets)
+        if ghi_data.dtype in [np.int16, np.uint16, np.int32, np.uint32] and np.max(ghi_data) > 2000:
+            ghi_data = ghi_data.astype(float) / 10.0
+            print(f"Applied scaling factor of 10 to GHI data")
 
     # Important: Check the actual range of the solar zenith angle data
     sza_min = np.min(solar_zenith)
@@ -249,44 +263,52 @@ def plot_solar_day_night(data, location_idx=0, n_steps=None, start_idx=0, show_t
         print(f"WARNING: Couldn't determine appropriate scaling for solar zenith angle.")
         print(f"Display may be incorrect. SZA should be in degrees with ~0-180 range.")
 
-    # Create figure with 2 subplots
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    # Create figure with 3 subplots if GHI is available, otherwise 2 subplots
+    n_plots = 3 if has_ghi else 2
+    fig, axes = plt.subplots(n_plots, 1, figsize=(12, 4*n_plots), sharex=True)
 
     # Plot solar zenith angle
-    ax1.plot(selected_timestamps, solar_zenith, 'b-', label='Solar Zenith Angle')
-    ax1.set_ylabel('Solar Zenith Angle (degrees)')
-    ax1.set_title(f'Solar Zenith Angle and Nighttime Mask for Location {location_idx}')
-    ax1.grid(True)
+    axes[0].plot(selected_timestamps, solar_zenith, 'b-', label='Solar Zenith Angle')
+    axes[0].set_ylabel('Solar Zenith Angle (degrees)')
+    axes[0].set_title(f'Solar Zenith Angle and Nighttime Mask for Location {location_idx}')
+    axes[0].grid(True)
 
     # Add horizontal line at 90 degrees if requested
     if show_threshold:
-        ax1.axhline(y=90, color='r', linestyle='--', label='90° Threshold')
+        axes[0].axhline(y=90, color='r', linestyle='--', label='90° Threshold')
 
     # Set reasonable y-limits based on the data
     if np.max(solar_zenith) > 0:
         y_max = min(180, np.max(solar_zenith) * 1.1)
-        ax1.set_ylim(0, y_max)
+        axes[0].set_ylim(0, y_max)
 
-    ax1.legend()
+    axes[0].legend()
 
     # Plot nighttime mask
-    ax2.plot(selected_timestamps, nighttime, 'g-', label='Nighttime Mask')
-    ax2.set_ylabel('Nighttime Mask')
-    ax2.set_xlabel('Time')
-    ax2.set_ylim(-0.1, 1.1)  # Add some padding to better see the binary values
-    ax2.grid(True)
-    ax2.legend()
+    axes[1].plot(selected_timestamps, nighttime, 'g-', label='Nighttime Mask')
+    axes[1].set_ylabel('Nighttime Mask')
+    axes[1].set_ylim(-0.1, 1.1)  # Add some padding to better see the binary values
+    axes[1].grid(True)
+    axes[1].legend()
+
+    # Plot GHI if available
+    if has_ghi:
+        axes[2].plot(selected_timestamps, ghi_data, 'r-', label='GHI')
+        axes[2].set_ylabel('GHI (W/m²)')
+        axes[2].set_xlabel('Time')
+        axes[2].grid(True)
+        axes[2].legend()
+    else:
+        axes[1].set_xlabel('Time')
 
     # Add shaded regions to indicate nighttime (SZA >= 90°)
     for i in range(len(solar_zenith)):
         if solar_zenith[i] >= 90 or nighttime[i] > 0.5:
-            # Add vertical span in both subplots
-            ax1.axvspan(selected_timestamps[i],
-                        selected_timestamps[min(i+1, len(selected_timestamps)-1)],
-                        alpha=0.2, color='gray')
-            ax2.axvspan(selected_timestamps[i],
-                        selected_timestamps[min(i+1, len(selected_timestamps)-1)],
-                        alpha=0.2, color='gray')
+            # Add vertical span in all subplots
+            for ax in axes:
+                ax.axvspan(selected_timestamps[i],
+                          selected_timestamps[min(i+1, len(selected_timestamps)-1)],
+                          alpha=0.2, color='gray')
 
     # Print location information and statistics
     location_info = f"Location: "

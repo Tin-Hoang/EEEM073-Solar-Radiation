@@ -80,7 +80,7 @@ class TimeSeriesDataset(Dataset):
             self._filtered_seq_data = {}
 
             # Always include certain core features
-            core_features = ['coordinates', 'elevation']
+            core_features = ['latitude', 'longitude', 'elevation']
 
             # Include time feature keys
             core_features.extend(self.time_feature_keys)
@@ -168,7 +168,7 @@ class TimeSeriesDataset(Dataset):
                                 value.shape[1] == combined_data[key].shape[1]):
                                 # Append along time dimension (axis 0)
                                 combined_data[key] = np.concatenate([combined_data[key], value], axis=0)
-                            elif key not in ['coordinates', 'elevation'] and value.shape != combined_data[key].shape:
+                            elif key not in ['latitude', 'longitude', 'elevation'] and value.shape != combined_data[key].shape:
                                 print(f"Warning: Shape mismatch for {key}, skipping append")
                         else:
                             # New key, just add it
@@ -203,9 +203,11 @@ class TimeSeriesDataset(Dataset):
             if 'time_features' in self._seq_data:
                 self.n_timesteps = self._seq_data['time_features'].shape[0]
 
-            # Try to infer from coordinates
-            if 'coordinates' in self._seq_data:
-                self.n_locations = self._seq_data['coordinates'].shape[0]
+            # Try to infer from latitude/longitude
+            if 'latitude' in self._seq_data:
+                self.n_locations = self._seq_data['latitude'].shape[0]
+            elif 'longitude' in self._seq_data:
+                self.n_locations = self._seq_data['longitude'].shape[0]
 
             # If still missing dimensions, use targets
             if not hasattr(self, 'n_timesteps') or not hasattr(self, 'n_locations'):
@@ -237,7 +239,7 @@ class TimeSeriesDataset(Dataset):
 
         For the common structure with (time, locations) features:
         - Individual time features (hour_sin, hour_cos, etc.) are treated as temporal features
-        - coordinates has shape (locations, 2)
+        - latitude and longitude have shape (locations,)
         - elevation has shape (locations,)
         - Most features have shape (time, locations)
 
@@ -268,15 +270,12 @@ class TimeSeriesDataset(Dataset):
             # Individual time features with shape (time,)
             if key in self.time_feature_keys and len(shape) == 1:
                 self.temporal_feature_keys.append(key)
-            # Coordinates with shape (locations, features)
-            elif key == 'coordinates' and len(shape) == 2 and shape[1] == 2:
-                self.static_feature_keys.append(key)
-            # Elevation with shape (locations,)
-            elif key == 'elevation' and len(shape) == 1:
+            # Latitude, longitude, and elevation with shape (locations,)
+            elif key in ['latitude', 'longitude', 'elevation'] and len(shape) == 1:
                 self.static_feature_keys.append(key)
             # Time series data with shape (time, locations)
             elif len(shape) == 2 and (
-                key not in self.time_feature_keys + ['coordinates', 'elevation']
+                key not in self.time_feature_keys + ['latitude', 'longitude', 'elevation']
             ):
                 self.time_series_keys.append(key)
             # Traditional 3D temporal features (samples, timesteps, features)
@@ -417,10 +416,13 @@ class TimeSeriesDataset(Dataset):
         if self.static_features is None:
             static_features_list = []
 
-            # Add coordinates if available
-            if 'coordinates' in self._seq_data:
-                # Get coordinates tensor
-                coords = self._get_tensor('coordinates')
+            # Add latitude and longitude if available
+            if 'latitude' in self._seq_data and 'longitude' in self._seq_data:
+                # Get latitude and longitude tensors
+                lat = self._get_tensor('latitude')
+                lon = self._get_tensor('longitude')
+                # Combine into coordinates tensor
+                coords = torch.stack([lat, lon], dim=1)
                 static_features_list.append(coords)
 
             # Add elevation if available
@@ -450,7 +452,7 @@ class TimeSeriesDataset(Dataset):
             # Free tensors if we're in strict memory saving mode
             if self.lazy_loading == "strict":
                 for key in self.static_feature_keys:
-                    if key in self.tensors and key not in ['coordinates', 'elevation']:
+                    if key in self.tensors and key not in ['latitude', 'longitude', 'elevation']:
                         del self.tensors[key]
                         self.tensors[key] = None
                 gc.collect()
