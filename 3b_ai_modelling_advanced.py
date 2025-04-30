@@ -64,7 +64,8 @@ WANDB_PROJECT = "EEEM073-Solar-Radiation"
 LOOKBACK = 24
 
 # Choose features to use in modeling
-TIME_KEY = 'time_features'
+TIME_KEY = ['hour_sin', 'hour_cos', 'day_sin', 'day_cos',
+            'month_sin', 'month_cos', 'dow_sin', 'dow_cos']
 SELECTED_FEATURES = [
     'air_temperature',
     'wind_speed',
@@ -121,7 +122,6 @@ test_dataset = TimeSeriesDataset(TEST_PREPROCESSED_DATA_PATH, lookback=LOOKBACK,
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
-
 
 # %%
 # Get a batch to determine input dimensions
