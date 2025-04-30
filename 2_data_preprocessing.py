@@ -220,7 +220,7 @@ for key, value in train_time_features_dict.items():
 # %%
 from utils.plot_utils import plot_time_features
 
-plot_time_features(train_data['timestamps'], train_time_features_dict, n_days=14)
+_ = plot_time_features(train_data['timestamps'], train_time_features_dict, n_days=14)
 
 
 # %% [markdown]
@@ -254,7 +254,7 @@ if "nighttime_mask" not in SELECTED_FEATURES:
 # %%
 from utils.plot_utils import plot_solar_day_night
 
-plot_solar_day_night(train_data, location_idx=0, n_steps=48, start_idx=0)
+_ = plot_solar_day_night(train_data, location_idx=0, n_steps=48, start_idx=0)
 
 
 # %% [markdown]

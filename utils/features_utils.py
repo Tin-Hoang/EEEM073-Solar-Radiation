@@ -1,135 +1,127 @@
 import numpy as np
 from datetime import datetime, timedelta
+import pytz
+try:
+    import pvlib
+    PVLIB_AVAILABLE = True
+except ImportError:
+    PVLIB_AVAILABLE = False
+    print("pvlib not available, using default solar position calculation")
 
 
-def compute_nighttime_mask(timestamps, lats, lons, solar_zenith_angle=None):
+def compute_nighttime_mask(timestamps, lats, lons, solar_zenith_angle=None, sza_format='degrees',
+                          sza_threshold=90.0, timezone='UTC', use_pvlib=False, return_float=False):
     """
-    Compute nighttime mask using the correct local time for each site
-    or directly from solar zenith angle if available.
+    Compute nighttime mask using the correct local time for each site or directly from solar zenith angle.
 
     Args:
         timestamps: Either a dictionary of {site_idx -> array of local timestamps}
-                   OR a single array of timestamps for all sites
-        lats: Array of latitude values
-        lons: Array of longitude values
-        solar_zenith_angle: Optional pre-computed solar zenith angle values (time, sites)
-                           in degrees, where 90° is horizon, <90° is day, >90° is night
-                           OR cosine of zenith angle, where 0 is horizon, >0 is day, <0 is night
+                   OR a single array of timestamps for all sites.
+        lats: Array of latitude values (degrees).
+        lons: Array of longitude values (degrees).
+        solar_zenith_angle: Optional pre-computed solar zenith angle values (time, sites).
+                           Format specified by sza_format: 'degrees', 'cosine', or 'scaled_degrees' (degrees * 100).
+        sza_format: Format of solar_zenith_angle: 'degrees', 'cosine', or 'scaled_degrees'.
+        sza_threshold: Solar zenith angle threshold (degrees) for nighttime (default: 90.0).
+        timezone: Timezone of timestamps ('UTC' or 'local'; default: 'UTC').
+        use_pvlib: Use pvlib for precise solar position calculation if available (default: False).
+        return_float: Return mask as float32 (0.0/1.0) instead of bool (default: False).
 
     Returns:
-        nighttime_mask: Boolean mask indicating nighttime (True) or daytime (False)
+        nighttime_mask: Array (n_times, n_sites) indicating nighttime (1.0/True) or daytime (0.0/False).
     """
-    # Determine the format of timestamps and handle accordingly
+    # Validate inputs
+    if not isinstance(lats, (list, np.ndarray)) or not isinstance(lons, (list, np.ndarray)):
+        raise ValueError("lats and lons must be lists or NumPy arrays")
+    lats = np.array(lats)
+    lons = np.array(lons)
+    if len(lats) != len(lons):
+        raise ValueError("lats and lons must have the same length")
+
+    # Handle timestamp formats
     if isinstance(timestamps, dict):
-        # Original format: dictionary of site_idx -> timestamps
         timestamps_dict = timestamps
-        n_times = len(next(iter(timestamps_dict.values())))  # Get length from first entry
+        n_times = len(next(iter(timestamps_dict.values())))
+        # Validate timestamp consistency
+        if len(set(len(t) for t in timestamps_dict.values())) > 1:
+            raise ValueError("Inconsistent timestamp lengths across sites")
+        if len(timestamps_dict) != len(lats):
+            raise ValueError("Number of sites in timestamps_dict does not match lats/lons")
     else:
-        # New format: single array of timestamps for all sites
         n_times = len(timestamps)
-        # Create a timestamps dictionary for compatibility with original function
-        timestamps_dict = {}
-        for site_idx in range(len(lats)):
-            timestamps_dict[site_idx] = timestamps
+        timestamps_dict = {site_idx: timestamps for site_idx in range(len(lats))}
 
     n_sites = len(lats)
-    nighttime_mask = np.zeros((n_times, n_sites), dtype=np.float32)
+    nighttime_mask = np.zeros((n_times, n_sites), dtype=bool)
 
-    # If solar zenith angle is already available, use it directly
+    # Use pvlib if requested and available
+    if use_pvlib and PVLIB_AVAILABLE and solar_zenith_angle is None:
+        print("Calculating nighttime mask using pvlib")
+        for site_idx in range(n_sites):
+            times = timestamps_dict[site_idx]
+            if timezone == 'UTC':
+                # Convert UTC to local time using longitude-based offset
+                utc_offset_hours = lons[site_idx] / 15  # 15° per hour
+                local_tz = pytz.FixedOffset(utc_offset_hours * 60)
+                times = [t.replace(tzinfo=pytz.UTC).astimezone(local_tz) for t in times]
+            location = pvlib.location.Location(lats[site_idx], lons[site_idx])
+            solar_position = location.get_solarposition(times)
+            nighttime_mask[:, site_idx] = (solar_position['zenith'] >= sza_threshold)
+        return nighttime_mask.astype(np.float32) if return_float else nighttime_mask
+
+    # Use provided solar zenith angle if available
     if solar_zenith_angle is not None:
-        # Make sure we have the right shape
-        if len(solar_zenith_angle.shape) == 2:
-            # First, determine what type of data we're dealing with
-            sza_min = np.min(solar_zenith_angle)
-            sza_max = np.max(solar_zenith_angle)
-            print(f"  Solar zenith angle data range: {sza_min} to {sza_max} (dtype: {solar_zenith_angle.dtype})")
+        if len(solar_zenith_angle.shape) != 2 or solar_zenith_angle.shape != (n_times, n_sites):
+            raise ValueError(f"solar_zenith_angle has unexpected shape {solar_zenith_angle.shape}, expected ({n_times}, {n_sites})")
 
-            # CASE 1: Potentially stored as degrees * 100 (common in int16/uint16 datasets)
-            if solar_zenith_angle.dtype in [np.int16, np.uint16, np.int32, np.uint32] and sza_max > 180:
-                # Assume it's stored as degrees * 100
+        print(f"Using solar zenith angle data (format: {sza_format})")
+        if sza_format == 'scaled_degrees':
+            if solar_zenith_angle.dtype in [np.int16, np.uint16, np.int32, np.uint32]:
                 solar_zenith_degrees = solar_zenith_angle.astype(float) / 100.0
-                print(f"  Interpreted as degrees * 100, scaled to {np.min(solar_zenith_degrees):.2f}-{np.max(solar_zenith_degrees):.2f}° range")
-
-                # Determine nighttime (solar zenith angle > 90 degrees means sun is below horizon)
-                nighttime_mask = (solar_zenith_degrees >= 90.0).astype(np.float32)
-                return nighttime_mask
-
-            # CASE 2: Potentially stored as cosine of zenith angle (between -1 and 1)
-            elif (sza_min >= -1.0 and sza_max <= 1.0) or (np.abs(sza_min) < 10 and np.abs(sza_max) < 10):
-                print(f"  Data appears to be cosine of zenith angle or in unusual units")
-
-                # Carefully handle potential cosine of zenith angle
-                if np.all((solar_zenith_angle >= -1.0) & (solar_zenith_angle <= 1.0)):
-                    cos_zenith = solar_zenith_angle.astype(float)
-
-                    # If data range is very small around 0-1, it might not be cosine but some other format
-                    # In this case, we'll calculate solar position from timestamps as a fallback
-                    if sza_max < 0.1 and sza_min > -0.1:
-                        print(f"  [WARNING] Solar zenith angle range is very small. Might not be correct format.")
-                        print(f"  Falling back to calculating from timestamps...")
-                        use_timestamps = True
-                    else:
-                        use_timestamps = False
-                        # For cosine values: cos(zenith) <= 0 means sun is below horizon (nighttime)
-                        nighttime_mask = (cos_zenith <= 0).astype(np.float32)
-                        print(f"  Using cosine of zenith angle directly, with threshold at 0")
-                        return nighttime_mask
-                else:
-                    print(f"  [WARNING] Values outside valid cosine range [-1, 1]")
-                    # Calculate solar position from timestamps as a fallback
-                    use_timestamps = True
-
-            # CASE 3: Likely stored as degrees directly
+                print(f"Scaled degrees to range {np.min(solar_zenith_degrees):.2f}-{np.max(solar_zenith_degrees):.2f}°")
             else:
-                solar_zenith_degrees = solar_zenith_angle.astype(float)
-                print(f"  Interpreted as degrees directly, range {np.min(solar_zenith_degrees):.2f}-{np.max(solar_zenith_degrees):.2f}°")
+                raise ValueError("scaled_degrees format requires integer dtype")
+            nighttime_mask = (solar_zenith_degrees >= sza_threshold)
+        elif sza_format == 'cosine':
+            cos_zenith = solar_zenith_angle.astype(float)
+            if not np.all((cos_zenith >= -1.0) & (cos_zenith <= 1.0)):
+                raise ValueError("Cosine SZA values must be in [-1, 1]")
+            cos_threshold = np.cos(np.deg2rad(sza_threshold))
+            nighttime_mask = (cos_zenith <= cos_threshold)
+            print(f"Using cosine of zenith angle, threshold at {cos_threshold:.4f}")
+        else:  # 'degrees'
+            solar_zenith_degrees = solar_zenith_angle.astype(float)
+            print(f"Degrees range {np.min(solar_zenith_degrees):.2f}-{np.max(solar_zenith_degrees):.2f}°")
+            nighttime_mask = (solar_zenith_degrees >= sza_threshold)
+        return nighttime_mask.astype(np.float32) if return_float else nighttime_mask
 
-                # Determine nighttime (solar zenith angle > 90 degrees means sun is below horizon)
-                nighttime_mask = (solar_zenith_degrees >= 90.0).astype(np.float32)
-                return nighttime_mask
-        else:
-            print(f"  [WARNING] solar_zenith_angle has unexpected shape {solar_zenith_angle.shape}, expected 2D array")
-            # Continue with calculation from timestamps
+    # Calculate nighttime mask from timestamps and coordinates
+    print("Calculating nighttime mask from timestamps and coordinates")
+    lat_rad = np.deg2rad(lats)[:, None]  # (n_sites, 1)
+    # Assume timestamps are same across sites for vectorization
+    sample_times = timestamps_dict[0]
+    doys = np.array([t.timetuple().tm_yday for t in sample_times])  # (n_times,)
+    hours = np.array([t.hour + t.minute / 60 + t.second / 3600 for t in sample_times])  # (n_times,)
 
-    # If we get here, we need to calculate from timestamps and coordinates
-    print("  [WARNING] Calculating nighttime mask from timestamps and coordinates")
+    if timezone == 'UTC':
+        # Adjust hours based on longitude
+        utc_offset_hours = lons / 15  # (n_sites,)
+        hours = hours[:, None] + utc_offset_hours[None, :]  # (n_times, n_sites)
+    else:
+        hours = hours[:, None]  # (n_times, 1)
 
-    # Calculate nighttime mask based on solar position
-    for site_idx in range(n_sites):
-        lat = lats[site_idx]
-        lon = lons[site_idx]
-        local_timestamps = timestamps_dict[site_idx]
+    decl = 23.45 * np.sin(np.deg2rad(360 * (284 + doys) / 365))  # (n_times,)
+    decl_rad = np.deg2rad(decl)[:, None]  # (n_times, 1)
+    ha = (hours - 12) * 15  # (n_times, n_sites)
+    ha_rad = np.deg2rad(ha)  # (n_times, n_sites)
 
-        lat_rad = np.deg2rad(lat)
+    cos_theta = (np.sin(lat_rad) * np.sin(decl_rad) +
+                 np.cos(lat_rad) * np.cos(decl_rad) * np.cos(ha_rad))  # (n_times, n_sites)
+    cos_theta = np.clip(cos_theta, -1.0, 1.0)
+    cos_threshold = np.cos(np.deg2rad(sza_threshold))
+    nighttime_mask = (cos_theta <= cos_threshold)
 
-        for t, timestamp in enumerate(local_timestamps):
-            # Extract day of year
-            doy = timestamp.timetuple().tm_yday
-
-            # Calculate solar declination angle
-            # Accurate formula for solar declination
-            decl = 23.45 * np.sin(np.deg2rad(360 * (284 + doy) / 365))
-            decl_rad = np.deg2rad(decl)
-
-            # Calculate hour angle (angle of sun east or west of local meridian)
-            # Use the exact local hour (hour + minutes/60 + seconds/3600)
-            hour = timestamp.hour + timestamp.minute / 60 + timestamp.second / 3600
-            ha = (hour - 12) * 15  # Hour angle in degrees (15 degrees per hour from solar noon)
-            ha_rad = np.deg2rad(ha)
-
-            # Calculate solar zenith angle cosine (cosine of angle between sun and zenith)
-            cos_theta = np.sin(lat_rad) * np.sin(decl_rad) + np.cos(lat_rad) * np.cos(decl_rad) * np.cos(ha_rad)
-
-            # For numerical stability, clip to valid range [-1, 1]
-            cos_theta = max(min(cos_theta, 1.0), -1.0)
-
-            # Determine if it's nighttime (cos_theta <= 0 means sun is below horizon)
-            if cos_theta <= 0:
-                nighttime_mask[t, site_idx] = 1.0
-            else:
-                nighttime_mask[t, site_idx] = 0.0
-
-    return nighttime_mask
+    return nighttime_mask.T.astype(np.float32) if return_float else nighttime_mask.T
 
 
 def compute_clearsky_ghi(timestamps, lats, lons, solar_zenith_angle=None):

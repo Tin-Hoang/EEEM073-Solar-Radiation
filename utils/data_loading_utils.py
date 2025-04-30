@@ -485,7 +485,7 @@ def resample_time_series(data_dict, time_interval):
                     resampled_df = df.resample(time_interval).mean()
 
                 # Fill any NaN values that might have been introduced
-                resampled_df = resampled_df.fillna(method='ffill').fillna(method='bfill')
+                resampled_df = resampled_df.ffill().bfill()
 
                 # Store in the resampled array
                 resampled_array[:, batch_start:batch_end] = resampled_df.values
