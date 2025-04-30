@@ -37,7 +37,7 @@ if module_path not in sys.path:
     sys.path.append(module_path)
 
 # Import project modules
-from utils.explainability import create_explainer, ShapExplainer, SensitivityAnalyzer
+from utils.explainer import create_explainer, ShapExplainer, SensitivityAnalyzer
 from utils.timeseriesdataset import TimeSeriesDataset
 from utils.model_utils import (
     load_model,
@@ -59,7 +59,6 @@ plt.style.use('seaborn-v0_8-whitegrid')
 
 # %%
 # --- Configuration ---
-MODEL_TYPE = 'mlp'  # Choose from: 'mlp', 'lstm', 'cnn_lstm', 'transformer', 'informer'
 MODEL_PATH = 'checkpoints/MLP_best_20250430_150231.pt' # <<< --- IMPORTANT: Set path to your trained model file
 DATA_PATH = 'data/processed/test_normalized_20250430_145205.h5' # <<< --- IMPORTANT: Set path to your test data file
 LOOKBACK = 24      # Lookback window used during model training
@@ -73,7 +72,6 @@ SHAP_ALGORITHM = 'kernel' # SHAP algorithm ('kernel', 'deep', 'gradient') - rele
 output_dir = Path(OUTPUT_DIR)
 output_dir.mkdir(parents=True, exist_ok=True)
 
-print(f"Model Type: {MODEL_TYPE}")
 print(f"Model Path: {MODEL_PATH}")
 print(f"Data Path: {DATA_PATH}")
 print(f"Output Directory: {output_dir}")
@@ -90,29 +88,8 @@ try:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Pre-import the model class based on MODEL_TYPE if needed
-    model_class = None
-    if MODEL_TYPE == 'lstm':
-        from models.lstm import LSTMModel
-        model_class = LSTMModel
-    elif MODEL_TYPE == 'cnn_lstm':
-        from models.cnn_lstm import CNNLSTMModel
-        model_class = CNNLSTMModel
-    elif MODEL_TYPE == 'mlp':
-        from models.mlp import MLPModel
-        model_class = MLPModel
-    elif MODEL_TYPE == 'transformer':
-        from models.transformer import TransformerModel
-        model_class = TransformerModel
-    elif MODEL_TYPE == 'informer':
-        from models.informer import InformerModel
-        model_class = InformerModel
-
-    if model_class:
-        print(f"Pre-loaded model class: {model_class.__name__}")
-
-    # Use the new load_model function that supports split time features
-    model, model_metadata = load_model(MODEL_PATH, device=device, model_class=model_class)
+    # Let load_model handle the model class loading
+    model, model_metadata = load_model(MODEL_PATH, device=device)
     print("Model loaded successfully.")
 
     # Ensure model is on the correct device
@@ -123,6 +100,7 @@ try:
     static_features = model_metadata.get('static_features', [])
     time_feature_keys = model_metadata.get('time_feature_keys', [])
     target_field = model_metadata.get('target_field', 'ghi')
+    model_type = model_metadata.get('model_type', '')
 
     # Print model summary
     print("\n===== Model Summary =====")
@@ -132,25 +110,9 @@ try:
     # Check and print input size info from metadata
     input_size = model_metadata.get('input_size', None)
     hidden_size = model_metadata.get('hidden_size', None)
+    print(f"Model type: {model_type}")
     print(f"Model input size from metadata: {input_size}")
     print(f"Model hidden size from metadata: {hidden_size}")
-
-    # If we have an MLP model, explicitly get the first layer's input dimension
-    if MODEL_TYPE == 'mlp' and hasattr(model, 'mlp'):
-        mlp = model.mlp
-        if hasattr(mlp, 'weight'):
-            input_size_direct = mlp.weight.shape[1]
-            print(f"MLP first layer input size: {input_size_direct}")
-        elif len(list(mlp.children())) > 0:
-            first_layer = next(iter(mlp.children()))
-            if hasattr(first_layer, 'weight'):
-                input_size_direct = first_layer.weight.shape[1]
-                print(f"MLP first layer input size: {input_size_direct}")
-            else:
-                print("Could not determine input size from first layer")
-        else:
-            print("Could not determine input size from model")
-
     print(f"Model expects time feature keys: {time_feature_keys}")
     print(f"Model expects temporal features: {temporal_features}")
     print(f"Model expects static features: {static_features}")
@@ -239,9 +201,9 @@ print(f"  - Static dimension: {static_dim}")
 # ## 4. Create Explainer
 
 # %%
-print(f"Creating {MODEL_TYPE} explainer...")
+print(f"Creating explainer for model type: {model_type}...")
 explainer = create_explainer(
-    model_type=MODEL_TYPE,
+    model_type=model_type,
     model=model,
     feature_names=temporal_features,
     static_feature_names=static_features
@@ -630,9 +592,9 @@ shap.summary_plot(
     max_display=20,
     show=False
 )
-plt.title(f'SHAP Summary Plot ({MODEL_TYPE.upper()})')
+plt.title(f'SHAP Summary Plot ({model_type.upper()})')
 plt.tight_layout()
-summary_plot_path = output_dir / f"{MODEL_TYPE}_shap_summary.png"
+summary_plot_path = output_dir / f"{model_type}_shap_summary.png"
 plt.savefig(summary_plot_path, dpi=300, bbox_inches='tight')
 plt.show()
 plt.close()
@@ -677,9 +639,9 @@ fig = explainer.plot_feature_importance(
     feature_names=feature_names_adjusted,  # Pass matched feature names
     max_display=20,
     show=False,
-    title=f"{MODEL_TYPE.upper()} Feature Importance (Mean |SHAP Value|)"
+    title=f"{model_type.upper()} Feature Importance (Mean |SHAP Value|)"
 )
-importance_plot_path = output_dir / f"{MODEL_TYPE}_feature_importance.png"
+importance_plot_path = output_dir / f"{model_type}_feature_importance.png"
 fig.savefig(importance_plot_path, dpi=300, bbox_inches='tight')
 plt.show()
 plt.close(fig)
@@ -707,16 +669,16 @@ if isinstance(explainer, SensitivityAnalyzer):
         sensitivity_df,
         max_display=20,
         show=False,
-        title=f"{MODEL_TYPE.upper()} Feature Sensitivity"
+        title=f"{model_type.upper()} Feature Sensitivity"
     )
-    sensitivity_plot_path = output_dir / f"{MODEL_TYPE}_sensitivity.png"
+    sensitivity_plot_path = output_dir / f"{model_type}_sensitivity.png"
     fig.savefig(sensitivity_plot_path, dpi=300, bbox_inches='tight')
     plt.show()
     plt.close(fig)
     print(f"Feature sensitivity plot saved to {sensitivity_plot_path}")
 
     # Save sensitivity data
-    sensitivity_csv_path = output_dir / f"{MODEL_TYPE}_sensitivity.csv"
+    sensitivity_csv_path = output_dir / f"{model_type}_sensitivity.csv"
     sensitivity_df.to_csv(sensitivity_csv_path, index=False)
     print(f"Sensitivity data saved to {sensitivity_csv_path}")
     print("Top 10 Features by Sensitivity:")

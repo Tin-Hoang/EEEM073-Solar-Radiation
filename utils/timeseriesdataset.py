@@ -9,7 +9,7 @@ class TimeSeriesDataset(Dataset):
     def __init__(self, preprocessed_data_path=None, seq_data=None, targets=None,
                  lazy_loading=False, dtype=torch.float32, lookback=24,
                  target_field='ghi', selected_features=None,
-                 include_target_history=True, time_feature_keys=None,
+                 include_target_history=False, time_feature_keys=None,
                  static_features=None):
         """
         Dataset for time series forecasting with memory optimization and customizable field names.
@@ -29,7 +29,7 @@ class TimeSeriesDataset(Dataset):
             selected_features: List of feature names to include in the prediction input.
                               If None, all available features are used.
             include_target_history: Whether to include past values of target field(s) for autoregressive
-                                   modeling (default: True)
+                                   modeling (default: False)
             time_feature_keys: List of individual time feature keys (default: standard cyclical time features)
                               If None, uses the standard set from normalize_utils.create_time_features
             static_features: List of static feature field names (required)
