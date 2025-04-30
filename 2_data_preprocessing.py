@@ -313,8 +313,6 @@ print("Normalized data shapes:")
 for key in norm_train_data:
     if isinstance(norm_train_data[key], np.ndarray):
         print(f"  {key}: {norm_train_data[key].shape}")
-    else:
-        print(f"  {key}: {type(norm_train_data[key])}")
 
 # %%
 from utils.data_persistence import save_normalized_data, save_scalers

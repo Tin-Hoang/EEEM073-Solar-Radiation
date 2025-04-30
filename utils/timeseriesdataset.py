@@ -9,7 +9,8 @@ class TimeSeriesDataset(Dataset):
     def __init__(self, preprocessed_data_path=None, seq_data=None, targets=None,
                  lazy_loading=False, dtype=torch.float32, lookback=24,
                  target_field='ghi', selected_features=None,
-                 include_target_history=True, time_feature_keys=None):
+                 include_target_history=True, time_feature_keys=None,
+                 static_features=None):
         """
         Dataset for time series forecasting with memory optimization and customizable field names.
 
@@ -31,10 +32,15 @@ class TimeSeriesDataset(Dataset):
                                    modeling (default: True)
             time_feature_keys: List of individual time feature keys (default: standard cyclical time features)
                               If None, uses the standard set from normalize_utils.create_time_features
+            static_features: List of static feature field names (required)
         """
+        if static_features is None:
+            raise ValueError("static_features parameter is required and must contain the list of static feature fields")
+
         self.lazy_loading = lazy_loading
         self.dtype = dtype
         self.lookback = lookback
+        self.static_features = static_features
 
         # Define the standard time feature keys used in normalize_utils.create_time_features
         if time_feature_keys is None:
@@ -44,6 +50,7 @@ class TimeSeriesDataset(Dataset):
             self.time_feature_keys = time_feature_keys
 
         print(f"Using time feature keys: {self.time_feature_keys}")
+        print(f"Using static features: {self.static_features}")
 
         # Handle single target field or multiple target fields
         self.target_field = target_field
@@ -55,7 +62,7 @@ class TimeSeriesDataset(Dataset):
         # Initialize tensor containers
         self.tensors = {}
         self.temporal_features = None
-        self.static_features = None
+        self.static_features_tensor = None
         self.targets_tensor = None
 
         # Print autoregressive settings
@@ -80,7 +87,7 @@ class TimeSeriesDataset(Dataset):
             self._filtered_seq_data = {}
 
             # Always include certain core features
-            core_features = ['latitude', 'longitude', 'elevation']
+            core_features = self.static_features.copy()
 
             # Include time feature keys
             core_features.extend(self.time_feature_keys)
@@ -239,8 +246,7 @@ class TimeSeriesDataset(Dataset):
 
         For the common structure with (time, locations) features:
         - Individual time features (hour_sin, hour_cos, etc.) are treated as temporal features
-        - latitude and longitude have shape (locations,)
-        - elevation has shape (locations,)
+        - Static features are defined by the static_features parameter
         - Most features have shape (time, locations)
 
         Args:
@@ -251,7 +257,7 @@ class TimeSeriesDataset(Dataset):
             data_dict = self._seq_data
 
         self.temporal_feature_keys = []
-        self.static_feature_keys = []
+        self.static_feature_keys = self.static_features.copy()  # Use the explicitly provided static features
         self.time_series_keys = []
         self.other_keys = []
 
@@ -270,13 +276,11 @@ class TimeSeriesDataset(Dataset):
             # Individual time features with shape (time,)
             if key in self.time_feature_keys and len(shape) == 1:
                 self.temporal_feature_keys.append(key)
-            # Latitude, longitude, and elevation with shape (locations,)
-            elif key in ['latitude', 'longitude', 'elevation'] and len(shape) == 1:
-                self.static_feature_keys.append(key)
+            # Skip static features as they are already defined by the static_features parameter
+            elif key in self.static_feature_keys:
+                continue
             # Time series data with shape (time, locations)
-            elif len(shape) == 2 and (
-                key not in self.time_feature_keys + ['latitude', 'longitude', 'elevation']
-            ):
+            elif len(shape) == 2 and key not in self.time_feature_keys + self.static_feature_keys:
                 self.time_series_keys.append(key)
             # Traditional 3D temporal features (samples, timesteps, features)
             elif len(shape) == 3:
@@ -413,53 +417,42 @@ class TimeSeriesDataset(Dataset):
 
     def _get_static_features(self, idx=None):
         """Get or create static features tensor"""
-        if self.static_features is None:
+        if self.static_features_tensor is None:
             static_features_list = []
 
-            # Add latitude and longitude if available
-            if 'latitude' in self._seq_data and 'longitude' in self._seq_data:
-                # Get latitude and longitude tensors
-                lat = self._get_tensor('latitude')
-                lon = self._get_tensor('longitude')
-                # Combine into coordinates tensor
-                coords = torch.stack([lat, lon], dim=1)
-                static_features_list.append(coords)
-
-            # Add elevation if available
-            if 'elevation' in self._seq_data:
-                # Get elevation tensor
-                elevation = self._get_tensor('elevation')
-                # Reshape to (locations, 1) for concatenation
-                elevation = elevation.unsqueeze(1)
-                static_features_list.append(elevation)
+            # Add static features based on the explicitly provided list
+            for key in self.static_feature_keys:
+                if key in self._seq_data:
+                    feature_tensor = self._get_tensor(key)
+                    # Ensure it's 2D by adding feature dimension if needed
+                    if len(feature_tensor.shape) == 1:
+                        feature_tensor = feature_tensor.unsqueeze(1)
+                    static_features_list.append(feature_tensor)
 
             # Combine static features if we have any
             if static_features_list:
                 if len(static_features_list) > 1:
                     # Concatenate along feature dimension
-                    self.static_features = torch.cat(static_features_list, dim=1)
+                    self.static_features_tensor = torch.cat(static_features_list, dim=1)
                 else:
                     # Just use the single static feature
-                    self.static_features = static_features_list[0]
-            elif self.static_feature_keys:
-                # Use another static feature if coordinates and elevation not available
-                key = self.static_feature_keys[0]
-                self.static_features = self._get_tensor(key)
+                    self.static_features_tensor = static_features_list[0]
             else:
-                # No static features available
-                self.static_features = torch.zeros((self.n_locations, 1), dtype=self.dtype)
+                # No static features available - create a placeholder
+                self.static_features_tensor = torch.zeros((self.n_locations, 1), dtype=self.dtype)
+                print("Warning: No static features available, using zero tensor as placeholder")
 
             # Free tensors if we're in strict memory saving mode
             if self.lazy_loading == "strict":
                 for key in self.static_feature_keys:
-                    if key in self.tensors and key not in ['latitude', 'longitude', 'elevation']:
+                    if key in self.tensors:
                         del self.tensors[key]
                         self.tensors[key] = None
                 gc.collect()
 
         if idx is not None:
-            return self.static_features[idx]
-        return self.static_features
+            return self.static_features_tensor[idx]
+        return self.static_features_tensor
 
     def _get_targets(self, idx=None):
         """Get or create targets tensor"""
@@ -539,8 +532,8 @@ class TimeSeriesDataset(Dataset):
             result = {}
 
             # Add static features
-            if self.static_features is not None:
-                result['static_features'] = self.static_features[loc_idx]
+            if self.static_features_tensor is not None:
+                result['static_features'] = self.static_features_tensor[loc_idx]
 
             # Add target
             if isinstance(self.targets_tensor, (list, np.ndarray)) and not isinstance(self.targets_tensor, torch.Tensor):
@@ -794,7 +787,8 @@ class TimeSeriesDataset(Dataset):
     @classmethod
     def from_file(cls, filepath, lazy_loading=False, dtype=torch.float32,
                  lookback=24, target_field='ghi', selected_features=None,
-                 include_target_history=True, time_feature_keys=None):
+                 include_target_history=True, time_feature_keys=None,
+                 static_features=None):
         """
         Create dataset directly from a saved file
 
@@ -809,6 +803,7 @@ class TimeSeriesDataset(Dataset):
             selected_features: List of feature names to include in the prediction input
             include_target_history: Whether to include past values of target field(s) (default: True)
             time_feature_keys: List of individual time feature keys (default: standard cyclical time features)
+            static_features: List of static feature field names (required)
 
         Returns:
             dataset: TimeSeriesDataset instance
@@ -821,7 +816,8 @@ class TimeSeriesDataset(Dataset):
             target_field=target_field,
             selected_features=selected_features,
             include_target_history=include_target_history,
-            time_feature_keys=time_feature_keys
+            time_feature_keys=time_feature_keys,
+            static_features=static_features
         )
 
     def _estimate_memory_usage(self):

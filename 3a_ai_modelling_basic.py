@@ -64,13 +64,13 @@ WANDB_PROJECT = "EEEM073-Solar-Radiation"
 LOOKBACK = 24
 
 # Choose features to use in modeling
-TIME_KEY = ['hour_sin', 'hour_cos', 'day_sin', 'day_cos',
+TIME_FEATURES = ['hour_sin', 'hour_cos', 'day_sin', 'day_cos',
             'month_sin', 'month_cos', 'dow_sin', 'dow_cos']
 SELECTED_FEATURES = [
     'air_temperature',
     'wind_speed',
     'relative_humidity',
-    'cloud_type',
+    'cloud_type',      # Categorical feature
     'solar_zenith_angle',
     'clearsky_ghi',
     'total_precipitable_water',
@@ -79,7 +79,7 @@ SELECTED_FEATURES = [
     'cld_opd_dcomp',
     'aod'
 ]
-
+STATIC_FEATURES = ['latitude', 'longitude', 'elevation']
 # Target variable
 TARGET_VARIABLE = 'ghi'
 
@@ -87,14 +87,14 @@ TARGET_VARIABLE = 'ghi'
 # %%
 from utils.data_persistence import load_normalized_data
 
-TRAIN_PREPROCESSED_DATA_PATH = "data/processed/train_normalized_20250430_050932.h5"
-VAL_PREPROCESSED_DATA_PATH = "data/processed/val_normalized_20250430_050940.h5"
-TEST_PREPROCESSED_DATA_PATH = "data/processed/test_normalized_20250430_050941.h5"
+TRAIN_PREPROCESSED_DATA_PATH = "data/processed/train_normalized_20250430_145157.h5"
+VAL_PREPROCESSED_DATA_PATH = "data/processed/val_normalized_20250430_145205.h5"
+TEST_PREPROCESSED_DATA_PATH = "data/processed/test_normalized_20250430_145205.h5"
 
 # Load sequences
 train_data, metadata = load_normalized_data(TRAIN_PREPROCESSED_DATA_PATH)
 
-SCALER_PATH = "data/processed/scalers_20250430_050941.pkl"
+SCALER_PATH = "data/processed/scalers_20250430_145206.pkl"
 scalers = load_scalers(SCALER_PATH)
 
 # Print metadata
@@ -114,9 +114,15 @@ for key, value in train_data.items():
 from utils.timeseriesdataset import TimeSeriesDataset
 
 # Create datasets
-train_dataset = TimeSeriesDataset(TRAIN_PREPROCESSED_DATA_PATH, lookback=LOOKBACK, target_field=TARGET_VARIABLE, selected_features=SELECTED_FEATURES, include_target_history=False)
-val_dataset = TimeSeriesDataset(VAL_PREPROCESSED_DATA_PATH, lookback=LOOKBACK, target_field=TARGET_VARIABLE, selected_features=SELECTED_FEATURES, include_target_history=False)
-test_dataset = TimeSeriesDataset(TEST_PREPROCESSED_DATA_PATH, lookback=LOOKBACK, target_field=TARGET_VARIABLE, selected_features=SELECTED_FEATURES, include_target_history=False)
+train_dataset = TimeSeriesDataset(TRAIN_PREPROCESSED_DATA_PATH, lookback=LOOKBACK, target_field=TARGET_VARIABLE,
+                                 selected_features=SELECTED_FEATURES, include_target_history=False,
+                                 static_features=STATIC_FEATURES)
+val_dataset = TimeSeriesDataset(VAL_PREPROCESSED_DATA_PATH, lookback=LOOKBACK, target_field=TARGET_VARIABLE,
+                               selected_features=SELECTED_FEATURES, include_target_history=False,
+                               static_features=STATIC_FEATURES)
+test_dataset = TimeSeriesDataset(TEST_PREPROCESSED_DATA_PATH, lookback=LOOKBACK, target_field=TARGET_VARIABLE,
+                                selected_features=SELECTED_FEATURES, include_target_history=False,
+                                static_features=STATIC_FEATURES)
 
 # Create data loaders
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
@@ -241,6 +247,9 @@ def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_
         model_filename = f"{model_name}_best_{timestamp}.pt"
         model_path = os.path.join(checkpoint_dir, model_filename)
 
+        # Combine time keys and selected features for the complete temporal feature set
+        all_temporal_features = TIME_FEATURES + SELECTED_FEATURES
+
         # Save the model with metadata using the new save_model function
         save_model(
             model=model,
@@ -261,9 +270,9 @@ def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_
                     "r2": test_metrics["r2"] if test_metrics else None,
                 }
             },
-            temporal_features=SELECTED_FEATURES,
-            static_features=['coordinates', 'elevation'],
-            time_feature_keys=TIME_KEY,
+            temporal_features=all_temporal_features,
+            static_features=STATIC_FEATURES,
+            time_feature_keys=TIME_FEATURES,
             config=CONFIG
         )
 
