@@ -8,8 +8,8 @@ import os
 class TimeSeriesDataset(Dataset):
     def __init__(self, preprocessed_data_path=None, seq_data=None, targets=None,
                  lazy_loading=False, dtype=torch.float32, lookback=24,
-                 target_field='ghi', time_feature_key='time_features', selected_features=None,
-                 include_target_history=True):
+                 target_field='ghi', selected_features=None,
+                 include_target_history=True, time_feature_keys=None):
         """
         Dataset for time series forecasting with memory optimization and customizable field names.
 
@@ -29,12 +29,21 @@ class TimeSeriesDataset(Dataset):
                               If None, all available features are used.
             include_target_history: Whether to include past values of target field(s) for autoregressive
                                    modeling (default: True)
-            time_feature_key: Name of the key that contains time features in seq_data (default: 'time_features')
+            time_feature_keys: List of individual time feature keys (default: standard cyclical time features)
+                              If None, uses the standard set from normalize_utils.create_time_features
         """
         self.lazy_loading = lazy_loading
         self.dtype = dtype
         self.lookback = lookback
-        self.time_feature_key = time_feature_key
+
+        # Define the standard time feature keys used in normalize_utils.create_time_features
+        if time_feature_keys is None:
+            self.time_feature_keys = ['hour_sin', 'hour_cos', 'day_sin', 'day_cos',
+                                     'month_sin', 'month_cos', 'dow_sin', 'dow_cos']
+        else:
+            self.time_feature_keys = time_feature_keys
+
+        print(f"Using time feature keys: {self.time_feature_keys}")
 
         # Handle single target field or multiple target fields
         self.target_field = target_field
@@ -71,7 +80,10 @@ class TimeSeriesDataset(Dataset):
             self._filtered_seq_data = {}
 
             # Always include certain core features
-            core_features = ['coordinates', 'elevation', self.time_feature_key]
+            core_features = ['coordinates', 'elevation']
+
+            # Include time feature keys
+            core_features.extend(self.time_feature_keys)
 
             # Always include the target field(s) in the data
             for field in self.target_fields:
@@ -188,8 +200,8 @@ class TimeSeriesDataset(Dataset):
         # If we couldn't infer from time series, try other approaches
         if not hasattr(self, 'n_timesteps') or not hasattr(self, 'n_locations'):
             # Try to infer from time_features
-            if self.time_feature_key in self._seq_data:
-                self.n_timesteps = self._seq_data[self.time_feature_key].shape[0]
+            if 'time_features' in self._seq_data:
+                self.n_timesteps = self._seq_data['time_features'].shape[0]
 
             # Try to infer from coordinates
             if 'coordinates' in self._seq_data:
@@ -224,7 +236,7 @@ class TimeSeriesDataset(Dataset):
         Identify temporal and static features in the dataset
 
         For the common structure with (time, locations) features:
-        - time_features is treated as a special case with shape (time, features)
+        - Individual time features (hour_sin, hour_cos, etc.) are treated as temporal features
         - coordinates has shape (locations, 2)
         - elevation has shape (locations,)
         - Most features have shape (time, locations)
@@ -253,9 +265,8 @@ class TimeSeriesDataset(Dataset):
             # Check shape and identify type
             shape = value.shape
 
-            # Special case for time_features
-            if key == self.time_feature_key and len(shape) == 2:
-                # time_features with shape (time, features)
+            # Individual time features with shape (time,)
+            if key in self.time_feature_keys and len(shape) == 1:
                 self.temporal_feature_keys.append(key)
             # Coordinates with shape (locations, features)
             elif key == 'coordinates' and len(shape) == 2 and shape[1] == 2:
@@ -265,7 +276,7 @@ class TimeSeriesDataset(Dataset):
                 self.static_feature_keys.append(key)
             # Time series data with shape (time, locations)
             elif len(shape) == 2 and (
-                key not in [self.time_feature_key, 'coordinates', 'elevation']
+                key not in self.time_feature_keys + ['coordinates', 'elevation']
             ):
                 self.time_series_keys.append(key)
             # Traditional 3D temporal features (samples, timesteps, features)
@@ -349,15 +360,22 @@ class TimeSeriesDataset(Dataset):
             # Initialize lists to store tensors
             temporal_tensors = []
 
-            # Process time_features if available (shape: time, features)
-            if self.time_feature_key in self.tensors and self.tensors[self.time_feature_key] is not None:
-                # Get time features tensor
-                time_features = self.tensors[self.time_feature_key]
-                # For 2D time features (time, features), we need to expand it with locations
-                # to match the dimensionality of other time series features
-                if len(time_features.shape) == 2:
-                    time_features = time_features.unsqueeze(1).repeat(1, self.n_locations, 1)
-                temporal_tensors.append(time_features)
+            # Process individual time features
+            individual_time_features = []
+            for key in self.time_feature_keys:
+                if key in self.tensors and self.tensors[key] is not None:
+                    # Get the tensor with shape (time,)
+                    time_tensor = self.tensors[key]
+
+                    # Reshape to (time, 1, 1) then expand to (time, locations, 1)
+                    time_feature = time_tensor.unsqueeze(1).unsqueeze(2).repeat(1, self.n_locations, 1)
+                    individual_time_features.append(time_feature)
+
+            # Combine individual time features if any
+            if individual_time_features:
+                # Combine along feature dimension
+                combined_time = torch.cat(individual_time_features, dim=2)  # (time, locations, n_features)
+                temporal_tensors.append(combined_time)
 
             # Process time series features
             time_series_features = []
@@ -635,21 +653,10 @@ class TimeSeriesDataset(Dataset):
                 # Add the timestamp for the current time_idx
                 result['time_index_local'] = self.tensors['time_index_local'][time_idx]
 
-            # Add nighttime field
-            if 'nighttime_mask' in self.tensors:
-                if self.lookback > 0:
-                    # Nighttime is auxiliary info, not a target, so we include all timesteps
-                    result['nighttime'] = self.tensors['nighttime_mask'][window_start:time_idx, loc_idx]
-                else:
-                    result['nighttime'] = self.tensors['nighttime_mask'][time_idx, loc_idx]
-            elif 'ghi' in self.tensors:
-                # Infer from GHI value (GHI=0 means nighttime)
-                if self.lookback > 0:
-                    ghi_values = self.tensors['ghi'][window_start:time_idx, loc_idx]
-                    result['nighttime'] = (ghi_values == 0).float()
-                else:
-                    ghi_value = self.tensors['ghi'][time_idx, loc_idx]
-                    result['nighttime'] = torch.tensor(float(ghi_value == 0), dtype=self.dtype)
+            # Add individual time features for current time step (for reference/debugging)
+            for key in self.time_feature_keys:
+                if key in self.tensors:
+                    result[f'current_{key}'] = self.tensors[key][time_idx]
 
             return result
         else:
@@ -680,22 +687,34 @@ class TimeSeriesDataset(Dataset):
             # Add time features and other temporal features
             temporal_features_list = []
 
-            # Add time features
-            if self.time_feature_key in self._seq_data:
-                if self.lookback > 0:
-                    # Get sequence window
-                    time_features = torch.tensor(
-                        self._seq_data[self.time_feature_key][window_start:time_idx],
-                        dtype=self.dtype
-                    )
-                    temporal_features_list.append(time_features)
-                else:
-                    # Get single timestep
-                    time_features = torch.tensor(
-                        self._seq_data[self.time_feature_key][time_idx],
-                        dtype=self.dtype
-                    )
-                    temporal_features_list.append(time_features)
+            # Add individual time features
+            individual_time_features = []
+            for key in self.time_feature_keys:
+                if key in self._seq_data:
+                    if self.lookback > 0:
+                        # Get sequence window
+                        time_feature = torch.tensor(
+                            self._seq_data[key][window_start:time_idx],
+                            dtype=self.dtype
+                        )
+                        # Add to current time features for reference
+                        result[f'current_{key}'] = torch.tensor(self._seq_data[key][time_idx], dtype=self.dtype)
+                        # Reshape to add feature dimension
+                        individual_time_features.append(time_feature.unsqueeze(1))
+                    else:
+                        # Get single timestep
+                        time_feature = torch.tensor(
+                            self._seq_data[key][time_idx],
+                            dtype=self.dtype
+                        )
+                        # Add to result directly for single timestep case
+                        result[f'current_{key}'] = time_feature
+                        individual_time_features.append(time_feature.unsqueeze(0))
+
+            # Combine individual time features if any
+            if individual_time_features:
+                combined_time_features = torch.cat(individual_time_features, dim=-1)
+                temporal_features_list.append(combined_time_features)
 
             # Add time series features
             for key in self.time_series_keys:
@@ -768,28 +787,12 @@ class TimeSeriesDataset(Dataset):
                     # For now, we assume they all have the same structure and concatenate on last dimension
                     result['temporal_features'] = torch.cat(temporal_features_list, dim=-1)
 
-            # Add nighttime field
-            if 'nighttime_mask' in self._seq_data:
-                if self.lookback > 0:
-                    nighttime = self._seq_data['nighttime_mask'][window_start:time_idx, loc_idx]
-                else:
-                    nighttime = self._seq_data['nighttime_mask'][time_idx, loc_idx]
-                result['nighttime'] = torch.tensor(nighttime, dtype=self.dtype)
-            elif 'ghi' in self._seq_data:
-                # Infer from GHI value (GHI=0 means nighttime)
-                if self.lookback > 0:
-                    ghi_values = self._seq_data['ghi'][window_start:time_idx, loc_idx]
-                    result['nighttime'] = torch.tensor(ghi_values == 0, dtype=self.dtype)
-                else:
-                    ghi_value = self._seq_data['ghi'][time_idx, loc_idx]
-                    result['nighttime'] = torch.tensor(float(ghi_value == 0), dtype=self.dtype)
-
             return result
 
     @classmethod
     def from_file(cls, filepath, lazy_loading=False, dtype=torch.float32,
                  lookback=24, target_field='ghi', selected_features=None,
-                 include_target_history=True, time_feature_key='time_features'):
+                 include_target_history=True, time_feature_keys=None):
         """
         Create dataset directly from a saved file
 
@@ -803,7 +806,7 @@ class TimeSeriesDataset(Dataset):
             target_field: Name of the field to use as target (default: 'ghi')
             selected_features: List of feature names to include in the prediction input
             include_target_history: Whether to include past values of target field(s) (default: True)
-            time_feature_key: Name of the key that contains time features in the data (default: 'time_features')
+            time_feature_keys: List of individual time feature keys (default: standard cyclical time features)
 
         Returns:
             dataset: TimeSeriesDataset instance
@@ -816,7 +819,7 @@ class TimeSeriesDataset(Dataset):
             target_field=target_field,
             selected_features=selected_features,
             include_target_history=include_target_history,
-            time_feature_key=time_feature_key
+            time_feature_keys=time_feature_keys
         )
 
     def _estimate_memory_usage(self):

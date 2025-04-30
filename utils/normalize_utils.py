@@ -12,7 +12,7 @@ def create_time_features(timestamps):
         timestamps: Array of datetime objects
 
     Returns:
-        time_features: Array of time features
+        time_features_dict: Dictionary of individual time features
     """
     hour_of_day = np.array([t.hour for t in timestamps])
     day_of_year = np.array([t.timetuple().tm_yday for t in timestamps])
@@ -29,12 +29,17 @@ def create_time_features(timestamps):
     dow_sin = np.sin(2 * np.pi * day_of_week / 7)
     dow_cos = np.cos(2 * np.pi * day_of_week / 7)
 
-    return np.column_stack([
-        hour_sin, hour_cos,
-        day_sin, day_cos,
-        month_sin, month_cos,
-        dow_sin, dow_cos
-    ])
+    # Return individual time features in a dictionary
+    return {
+        'hour_sin': hour_sin,
+        'hour_cos': hour_cos,
+        'day_sin': day_sin,
+        'day_cos': day_cos,
+        'month_sin': month_sin,
+        'month_cos': month_cos,
+        'dow_sin': dow_sin,
+        'dow_cos': dow_cos
+    }
 
 
 def normalize_data(data, selected_features, target_variable, scalers=None, fit_scalers=True):
@@ -71,11 +76,18 @@ def normalize_data(data, selected_features, target_variable, scalers=None, fit_s
         # This ensures we don't get TypeError when saving to HDF5
         normalized_data['time_index_local'] = np.array([ts.isoformat() for ts in data['timestamps']], dtype='S')
 
-        # Create time features (8 cyclical features)
-        normalized_data['time_features'] = create_time_features(data['timestamps'])
-    elif 'time_features' in data:
-        # If already processed, just copy
-        normalized_data['time_features'] = data['time_features']
+        # Create time features (individual cyclical features)
+        time_features_dict = create_time_features(data['timestamps'])
+        # Add each time feature to the normalized data
+        for key, value in time_features_dict.items():
+            normalized_data[key] = value
+    else:
+        # If time features have already been processed, copy them individually
+        time_feature_keys = ['hour_sin', 'hour_cos', 'day_sin', 'day_cos',
+                             'month_sin', 'month_cos', 'dow_sin', 'dow_cos']
+        for key in time_feature_keys:
+            if key in data:
+                normalized_data[key] = data[key]
 
     # Process coordinates
     if 'latitude' in data and 'longitude' in data:
@@ -186,9 +198,12 @@ def create_sequences(data, lookback=24, selected_features=None, target_variable=
     if 'time_index' in data:
         seq_data['time_index'] = data['time_index'][lookback:]
 
-    # Copy time features directly (shape will be n_timesteps-lookback, n_time_features)
-    if 'time_features' in data:
-        seq_data['time_features'] = data['time_features'][lookback:, :]
+    # Copy time features individually (shifted by lookback)
+    time_feature_keys = ['hour_sin', 'hour_cos', 'day_sin', 'day_cos',
+                         'month_sin', 'month_cos', 'dow_sin', 'dow_cos']
+    for key in time_feature_keys:
+        if key in data:
+            seq_data[key] = data[key][lookback:]
 
     # Copy coordinates directly (shape will be n_locations, 2)
     if 'coordinates' in data:
@@ -200,7 +215,7 @@ def create_sequences(data, lookback=24, selected_features=None, target_variable=
 
     # Copy all time series features with shape (time, locations)
     for feature in selected_features:
-        if feature in data and feature not in ['time_features', 'coordinates', 'elevation']:
+        if feature in data and feature not in ['coordinates', 'elevation'] and feature not in time_feature_keys:
             # Keep the original structure but shift by lookback
             seq_data[feature] = data[feature][lookback:, :]
 

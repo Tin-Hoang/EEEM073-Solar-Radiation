@@ -11,8 +11,6 @@ import torch
 import wandb
 from functools import wraps
 
-from utils.model_utils import get_model_summary
-
 # Default settings
 USE_WANDB = False
 KEEP_RUN_OPEN = False
@@ -180,6 +178,8 @@ def track_experiment(func):
                 model = args[0]
 
             try:
+                # Import get_model_summary here to avoid circular imports
+                from utils.model_utils import get_model_summary
                 model_summary = get_model_summary(model,
                                                 temporal_features_shape,
                                                 static_features_shape)
@@ -283,7 +283,7 @@ def create_evaluation_plots(metrics, model_name=''):
     """
     y_true = metrics['y_true']
     y_pred = metrics['y_pred']
-    nighttime = metrics['nighttime'].flatten() > 0.5
+    nighttime = metrics['nighttime_mask'].flatten() > 0.5
 
     # Calculate residuals
     residuals = y_true - y_pred

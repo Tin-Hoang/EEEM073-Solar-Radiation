@@ -6,7 +6,6 @@ from tqdm import tqdm
 import wandb
 import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-
 import time
 
 from utils.wandb_utils import track_experiment, is_wandb_enabled
@@ -56,7 +55,7 @@ def train_model(
     if config is not None:
         print(f"Training config: {config}")
 
-    history = {'train_loss': [], 'val_loss': [], 'train_mae': [], 'val_mae': []}
+    history = {'train_loss': [], 'val_loss': [], 'train_mae': [], 'val_mae': [], 'train_samples': [], 'val_samples': []}
     best_val_loss = float('inf')
     counter = 0
     best_model_state = None
@@ -68,6 +67,7 @@ def train_model(
         all_train_outputs = []
         all_train_targets = []
         debug_counter = 0
+        train_samples = 0  # Initialize sample counter for training
 
         # Use tqdm for batch-level progress
         train_loop = tqdm(train_loader, desc=f"Training {model_name}", leave=False)
@@ -79,6 +79,8 @@ def train_model(
             temporal_features = batch['temporal_features'].to(device)
             static_features = batch['static_features'].to(device)
             target = batch['target'].to(device)
+            batch_size = temporal_features.size(0)
+            train_samples += batch_size  # Count samples
 
             # Ensure target has the right shape for broadcasting
             if len(target.shape) == 1 and target.shape[0] > 1:
@@ -144,6 +146,7 @@ def train_model(
         # Extract metrics needed for training loop
         val_loss = val_metrics['mse']  # MSE is equivalent to the criterion we use (nn.MSELoss)
         val_mae = val_metrics['mae']
+        val_samples = val_metrics['total_samples']  # Get number of validation samples
 
         # Update learning rate
         scheduler.step(val_loss)
@@ -153,6 +156,8 @@ def train_model(
         history['val_loss'].append(val_loss)
         history['train_mae'].append(train_mae)
         history['val_mae'].append(val_mae)
+        history['train_samples'].append(train_samples)
+        history['val_samples'].append(val_samples)
 
         # Log metrics to wandb
         if is_wandb_enabled():
@@ -175,11 +180,6 @@ def train_model(
             counter = 0
             best_model_state = model.state_dict().copy()
 
-            # Save best model checkpoint in wandb
-            if is_wandb_enabled():
-                model_path = f"{model_name}_best.pt"
-                torch.save(model.state_dict(), model_path)
-                wandb.save(model_path)
         else:
             counter += 1
             if counter >= patience:
@@ -187,7 +187,7 @@ def train_model(
                 break
 
     # Load best model
-    print("LOADING BEST MODEL FROM TRAINING SESSION")
+    print("Loading best model from training session. The model object now can be used to make predictions.")
     model.load_state_dict(best_model_state)
     return history
 
@@ -234,9 +234,9 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
                 target = target.view(-1, 1)
 
             # Check if we have nighttime data
-            if 'nighttime' in batch:
+            if 'nighttime_mask' in batch:
                 has_nighttime_data = True
-                nighttime = batch['nighttime']
+                nighttime = batch['nighttime_mask']
                 # Ensure nighttime has same shape as target
                 if nighttime.shape != target.cpu().shape:
                     # Handle different shapes - if nighttime is a sequence, take the last value
@@ -264,6 +264,7 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
                             print(f"Warning: Nighttime shape {nighttime.shape} incompatible with target shape {target.shape}")
                             nighttime = torch.zeros_like(target.cpu())
             else:
+                print("No nighttime data found in batch")
                 # Create a placeholder (all zeros) for nighttime
                 nighttime = torch.zeros_like(target).cpu()
 
@@ -349,11 +350,13 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
         night_rmse = np.sqrt(night_mse)
         night_mae = mean_absolute_error(y_true_orig[night_mask], y_pred_orig[night_mask])
         night_r2 = r2_score(y_true_orig[night_mask], y_pred_orig[night_mask]) if np.unique(y_true_orig[night_mask]).size > 1 else np.nan
-
-        # Calculate nighttime WAPE
-        night_abs_error_sum = np.sum(np.abs(y_true_orig[night_mask] - y_pred_orig[night_mask]))
         night_abs_actual_sum = np.sum(np.abs(y_true_orig[night_mask]))
-        night_wape = (night_abs_error_sum / night_abs_actual_sum) * 100 if night_abs_actual_sum > 0 else float('nan')
+        if night_abs_actual_sum > 0:
+            print("Warning: Non-zero GHI detected in nighttime data, WAPE may be unreliable")
+            night_abs_error_sum = np.sum(np.abs(y_true_orig[night_mask] - y_pred_orig[night_mask]))
+            night_wape = (night_abs_error_sum / night_abs_actual_sum) * 100
+        else:
+            night_wape = np.nan
     else:
         night_mse = night_rmse = night_mae = night_r2 = night_wape = np.nan
 
@@ -362,7 +365,7 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
         'mse': mse, 'rmse': rmse, 'mae': mae, 'r2': r2, 'wape': wape,
         'day_mse': day_mse, 'day_rmse': day_rmse, 'day_mae': day_mae, 'day_r2': day_r2, 'day_wape': day_wape,
         'night_mse': night_mse, 'night_rmse': night_rmse, 'night_mae': night_mae, 'night_r2': night_r2, 'night_wape': night_wape,
-        'y_pred': y_pred_orig, 'y_true': y_true_orig, 'nighttime': all_nighttime,
+        'y_pred': y_pred_orig, 'y_true': y_true_orig, 'nighttime_mask': all_nighttime,
         'total_inference_time': total_inference_time,
         'total_samples': total_samples,
         'avg_time_per_sample': avg_time_per_sample,
