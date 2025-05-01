@@ -46,6 +46,45 @@ class BaseExplainer(ABC):
         """
         pass
 
+# For GradientExplainer, we need a proper torch.nn.Module to ensure correct framework detection
+class PyTorchModelWrapper(torch.nn.Module):
+    def __init__(self, orig_model, custom_wrapper, static_tensor, device, use_custom):
+        super().__init__()
+        self.orig_model = orig_model
+        self.custom_wrapper = custom_wrapper
+        self.static_tensor = static_tensor
+        self.device = device
+        self.use_custom = use_custom
+
+    def forward(self, x):
+        if self.use_custom and self.custom_wrapper is not None:
+            # Use the custom wrapper with return_pytorch_tensor=True
+            outputs = self.custom_wrapper(x, return_pytorch_tensor=True)
+            # Ensure outputs have shape (batch_size, num_outputs)
+            if len(outputs.shape) == 1:
+                # If output is 1D (e.g., single output value per sample)
+                outputs = outputs.unsqueeze(1)  # Add a dimension to make it (batch_size, 1)
+            return outputs
+        else:
+            # Default behavior - manage static tensor ourselves
+            batch_size = x.shape[0]
+            static_tensor_for_batch = None
+
+            if self.static_tensor is not None:
+                if batch_size <= self.static_tensor.shape[0]:
+                    static_tensor_for_batch = self.static_tensor[:batch_size]
+                else:
+                    # Handle unexpected larger batch size
+                    repeat_factor = (batch_size + self.static_tensor.shape[0] - 1) // self.static_tensor.shape[0]
+                    static_tensor_for_batch = self.static_tensor.repeat(repeat_factor, 1)[:batch_size]
+
+            # Call the original model
+            outputs = self.orig_model(x, static_tensor_for_batch)
+            # Ensure outputs have shape (batch_size, num_outputs)
+            if len(outputs.shape) == 1:
+                # If output is 1D (e.g., single output value per sample)
+                outputs = outputs.unsqueeze(1)  # Add a dimension to make it (batch_size, 1)
+            return outputs
 
 class ShapExplainer(BaseExplainer):
     """Explainer using SHAP (SHapley Additive exPlanations) for model interpretability."""
@@ -72,22 +111,35 @@ class ShapExplainer(BaseExplainer):
         self.custom_model_wrapper = custom_wrapper
         print("Custom model wrapper set successfully.")
 
-    def initialize_explainer(self, background_data: Tuple[np.ndarray, Optional[np.ndarray]], algorithm: str = "kernel"):
+    def initialize_explainer(self, background_data: Union[np.ndarray, Tuple[np.ndarray, Optional[np.ndarray]]],
+                            algorithm: str = "kernel"):
         """Initialize the SHAP explainer with background data.
 
         Args:
-            background_data: Tuple of (X_temporal, X_static) numpy arrays to use as background data
+            background_data: Combined numpy array (temporal + static) or tuple of (X_temporal, X_static)
             algorithm: SHAP algorithm to use ('kernel' or 'gradient')
         """
         self.algorithm = algorithm
-        X_temporal_bg, X_static_bg = background_data
 
-        # Use custom model wrapper if provided, otherwise use the default one
+        # Handle both combined data and tuple format for backward compatibility
+        if isinstance(background_data, tuple):
+            print("Warning: Using deprecated tuple format for background_data. "
+                  "Consider using a combined array instead.")
+            X_temporal_bg, X_static_bg = background_data
+            # For backward compatibility, we would need to combine here
+            # But we'll skip this for now as it requires knowledge of sequence length
+        else:
+            # Using new combined format (preferred)
+            X_combined_bg = background_data
+            print(f"Using combined background data with shape {X_combined_bg.shape}")
+
+        # Use custom model wrapper if provided
         if self.custom_model_wrapper is not None:
             model_wrapper = self.custom_model_wrapper
             print("Using custom model wrapper for SHAP explainer")
         else:
-            # Default model wrapper function
+            # Default model wrapper function (backward compatibility)
+            # This is mainly kept for backward compatibility
             def model_wrapper(x):
                 if len(x.shape) == 2 and len(self.feature_names) != x.shape[1]:
                     # Input is flattened, reshape it for the model
@@ -113,8 +165,10 @@ class ShapExplainer(BaseExplainer):
 
                     # Set static features to None if not provided
                     static_input = None
-                    if X_static_bg is not None:
-                        static_input = torch.tensor(X_static_bg, dtype=torch.float32).to(self.device)
+                    if isinstance(background_data, tuple) and len(background_data) > 1:
+                        X_static_bg = background_data[1]
+                        if X_static_bg is not None:
+                            static_input = torch.tensor(X_static_bg, dtype=torch.float32).to(self.device)
 
                     with torch.no_grad():
                         return self.model(x_tensor, static_input).cpu().numpy()
@@ -124,56 +178,29 @@ class ShapExplainer(BaseExplainer):
         # Initialize the appropriate SHAP explainer based on the algorithm
         if algorithm == "kernel":
             # For black-box models
-            self.explainer = shap.KernelExplainer(model_wrapper, X_temporal_bg, feature_names=self.feature_names)
+            # Use combined data for kernel explainer
+            if isinstance(background_data, tuple):
+                X_bg_for_kernel = background_data[0]  # Use only temporal part for backward compatibility
+            else:
+                X_bg_for_kernel = background_data  # Use combined data
+
+            self.explainer = shap.KernelExplainer(model_wrapper, X_bg_for_kernel)
+
         elif algorithm == "gradient":
             # For gradient-based models
-            # Convert background data to temporal tensor for GradientExplainer
-            temporal_bg_tensor = torch.tensor(X_temporal_bg, dtype=torch.float32).to(self.device)
-
-            # For GradientExplainer, we need a proper torch.nn.Module to ensure correct framework detection
-            class PyTorchModelWrapper(torch.nn.Module):
-                def __init__(self, orig_model, custom_wrapper, static_tensor, device, use_custom):
-                    super().__init__()
-                    self.orig_model = orig_model
-                    self.custom_wrapper = custom_wrapper
-                    self.static_tensor = static_tensor
-                    self.device = device
-                    self.use_custom = use_custom
-
-                def forward(self, x):
-                    if self.use_custom and self.custom_wrapper is not None:
-                        # Use the custom wrapper with return_pytorch_tensor=True
-                        outputs = self.custom_wrapper(x, return_pytorch_tensor=True)
-                        # Ensure outputs have shape (batch_size, num_outputs)
-                        if len(outputs.shape) == 1:
-                            # If output is 1D (e.g., single output value per sample)
-                            outputs = outputs.unsqueeze(1)  # Add a dimension to make it (batch_size, 1)
-                        return outputs
-                    else:
-                        # Default behavior - manage static tensor ourselves
-                        batch_size = x.shape[0]
-                        static_tensor_for_batch = None
-
-                        if self.static_tensor is not None:
-                            if batch_size <= self.static_tensor.shape[0]:
-                                static_tensor_for_batch = self.static_tensor[:batch_size]
-                            else:
-                                # Handle unexpected larger batch size
-                                repeat_factor = (batch_size + self.static_tensor.shape[0] - 1) // self.static_tensor.shape[0]
-                                static_tensor_for_batch = self.static_tensor.repeat(repeat_factor, 1)[:batch_size]
-
-                        # Call the original model
-                        outputs = self.orig_model(x, static_tensor_for_batch)
-                        # Ensure outputs have shape (batch_size, num_outputs)
-                        if len(outputs.shape) == 1:
-                            # If output is 1D (e.g., single output value per sample)
-                            outputs = outputs.unsqueeze(1)  # Add a dimension to make it (batch_size, 1)
-                        return outputs
-
-            # Prepare static tensor
-            static_bg_tensor = None
-            if X_static_bg is not None:
-                static_bg_tensor = torch.tensor(X_static_bg, dtype=torch.float32).to(self.device)
+            # Convert background data to tensor for GradientExplainer
+            if isinstance(background_data, tuple):
+                # Backward compatibility: convert tuple to tensors
+                temporal_bg_tensor = torch.tensor(background_data[0], dtype=torch.float32).to(self.device)
+                static_bg_tensor = None
+                if background_data[1] is not None:
+                    static_bg_tensor = torch.tensor(background_data[1], dtype=torch.float32).to(self.device)
+                bg_tensor_for_explainer = temporal_bg_tensor
+            else:
+                # Convert combined data to tensor
+                bg_tensor = torch.tensor(background_data, dtype=torch.float32).to(self.device)
+                bg_tensor_for_explainer = bg_tensor
+                # No need to separate static tensor as our custom wrapper handles it
 
             # Create the module wrapper
             if self.custom_model_wrapper is not None:
@@ -181,31 +208,39 @@ class ShapExplainer(BaseExplainer):
                 wrapped_model = PyTorchModelWrapper(
                     self.model,
                     self.custom_model_wrapper,
-                    static_bg_tensor,
+                    None,  # No need for static_bg_tensor as it's handled in custom wrapper
                     self.device,
                     use_custom=True
                 )
             else:
                 print("Using default PyTorchModelWrapper for GradientExplainer")
+                # For backward compatibility - use the old separation method
+                if isinstance(background_data, tuple):
+                    static_tensor_for_wrapper = static_bg_tensor
+                else:
+                    # We can't easily separate combined data here without knowing the structure
+                    # This is why a custom wrapper is recommended with combined data
+                    static_tensor_for_wrapper = None
+
                 wrapped_model = PyTorchModelWrapper(
                     self.model,
                     None,
-                    static_bg_tensor,
+                    static_tensor_for_wrapper,
                     self.device,
                     use_custom=False
                 )
 
             # Initialize GradientExplainer with the PyTorch module wrapper
-            print(f"Initializing GradientExplainer with PyTorchModelWrapper. Temporal background shape: {temporal_bg_tensor.shape}")
-            self.explainer = shap.GradientExplainer(wrapped_model, temporal_bg_tensor)
+            print(f"Initializing GradientExplainer with PyTorchModelWrapper. Background data shape: {bg_tensor_for_explainer.shape}")
+            self.explainer = shap.GradientExplainer(wrapped_model, bg_tensor_for_explainer)
         else:
             raise ValueError(f"Unsupported SHAP algorithm: {algorithm}. Use 'kernel' or 'gradient'.")
 
-    def explain_batch(self, batch_data: Tuple[np.ndarray, Optional[np.ndarray]]) -> np.ndarray:
+    def explain_batch(self, batch_data: Union[np.ndarray, Tuple[np.ndarray, Optional[np.ndarray]]]) -> np.ndarray:
         """Explain a batch of samples using SHAP.
 
         Args:
-            batch_data: Tuple of (X_temporal, X_static) numpy arrays
+            batch_data: Combined numpy array (temporal + static) or tuple of (X_temporal, X_static)
 
         Returns:
             SHAP values as numpy array
@@ -213,27 +248,28 @@ class ShapExplainer(BaseExplainer):
         if self.explainer is None:
             raise ValueError("Explainer not initialized. Call initialize_explainer first.")
 
-        X_temporal, X_static = batch_data
+        # Handle both combined data and tuple format for backward compatibility
+        if isinstance(batch_data, tuple):
+            print("Warning: Using deprecated tuple format for batch_data. Consider using a combined array.")
+            X_temporal, X_static = batch_data
+        else:
+            # Using new combined format (preferred)
+            X_combined = batch_data
+            print(f"Using combined data with shape {X_combined.shape}")
 
         if self.algorithm == "gradient":
             # GradientExplainer expects PyTorch tensors
-            x_tensor = torch.tensor(X_temporal, dtype=torch.float32).to(self.device)
+            if isinstance(batch_data, tuple):
+                x_tensor = torch.tensor(X_temporal, dtype=torch.float32).to(self.device)
+            else:
+                x_tensor = torch.tensor(X_combined, dtype=torch.float32).to(self.device)
 
             # Print debug info about tensor shapes
             print(f"Input tensor shape for explainer: {x_tensor.shape}")
             print(f"Using algorithm: {self.algorithm}")
-            # Directly call the proper method
 
             print("Calling GradientExplainer.shap_values...")
-            # For gradient explainer, we maintain 3D structure for temporal analysis
-            # We explicitly do NOT flatten the input for gradient explainer
-            if len(x_tensor.shape) == 3:
-                print(f"Using 3D input with shape {x_tensor.shape} for gradient explainer")
-                shap_values = self.explainer.shap_values(x_tensor)
-            else:
-                # If input is already 2D, use it as is
-                print(f"Using input with shape {x_tensor.shape} for gradient explainer")
-                shap_values = self.explainer.shap_values(x_tensor)
+            shap_values = self.explainer.shap_values(x_tensor)
 
             # Convert to numpy if needed
             if isinstance(shap_values, torch.Tensor):
@@ -259,34 +295,25 @@ class ShapExplainer(BaseExplainer):
                         shap_values = shap_values.reshape(orig_shape)
                     except Exception as reshape_err:
                         print(f"Warning: Could not reshape SHAP values: {str(reshape_err)}")
-                        # Don't fail completely, just warn and continue
 
             print(f"Final SHAP values shape: {shap_values.shape}")
 
         else:
             # KernelExplainer works with numpy arrays
-            # For KernelExplainer, we DO need to flatten 3D input
-            if len(X_temporal.shape) == 3:
-                print(f"Flattening 3D input with shape {X_temporal.shape} for kernel explainer")
-                batch_size = X_temporal.shape[0]
-                X_temporal_flat = X_temporal.reshape(batch_size, -1)
-                shap_values = self.explainer.shap_values(X_temporal_flat)
-
-                # Attempt to reshape the output back to 3D if needed
-                try:
-                    # If shap_values is a list (multi-output model)
-                    if isinstance(shap_values, list):
-                        shap_values = shap_values[0]
-
-                    # Try to reshape back to original 3D shape for consistency
-                    if len(shap_values.shape) == 2:  # Should be (batch_size, flattened_features)
-                        print(f"Reshaping kernel SHAP values back to 3D: {shap_values.shape} -> {X_temporal.shape}")
-                        shap_values = shap_values.reshape(X_temporal.shape)
-                except Exception as reshape_err:
-                    print(f"Warning: Could not reshape kernel SHAP values back to 3D: {str(reshape_err)}")
+            # For KernelExplainer, use the combined data directly if available
+            if isinstance(batch_data, tuple):
+                # Backward compatibility - flatten 3D to 2D if needed
+                if len(X_temporal.shape) == 3:
+                    print(f"Flattening 3D input with shape {X_temporal.shape} for kernel explainer")
+                    batch_size = X_temporal.shape[0]
+                    X_temporal_flat = X_temporal.reshape(batch_size, -1)
+                    shap_values = self.explainer.shap_values(X_temporal_flat)
+                else:
+                    # Already 2D input
+                    shap_values = self.explainer.shap_values(X_temporal)
             else:
-                # Already 2D input
-                shap_values = self.explainer.shap_values(X_temporal)
+                # Using new combined format
+                shap_values = self.explainer.shap_values(X_combined)
 
             # Some explainers return a list of arrays (one per output)
             # We take the first one (assuming single output)

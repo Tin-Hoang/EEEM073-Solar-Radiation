@@ -59,10 +59,10 @@ TRAIN_PREPROCESSED_DATA_PATH = 'data/processed/train_normalized_20250430_145157.
 TEST_PREPROCESSED_DATA_PATH = 'data/processed/test_normalized_20250430_145205.h5' # <<< --- IMPORTANT: Set path to your test data file
 LOOKBACK = 24      # Lookback window used during model training
 BATCH_SIZE = 64    # Batch size for data loading
-N_SAMPLES = 10    # Number of explanation samples from the test set to use
+N_SAMPLES = 50    # Number of explanation samples from the test set to use
 BACKGROUND_SIZE = 20  # Number of background samples from the training set to use
 OUTPUT_DIR = 'explainability' # Directory to save results
-SHAP_ALGORITHM = 'kernel' # SHAP algorithm ('kernel', 'deep', 'gradient') - relevant only if using SHAP
+SHAP_ALGORITHM = 'gradient' # SHAP algorithm ('kernel' = model agnostic, 'gradient' = Deep Learning)
 # ---
 
 # Create output directory
@@ -94,6 +94,8 @@ try:
 
     # Ensure model is on the correct device
     model = model.to(device)
+    # Make sure model is in evaluation mode to disable batch norm statistics updates
+    model.eval()
 
     # Extract feature information from model metadata
     temporal_features = model_metadata.get('temporal_features', [])
@@ -387,8 +389,7 @@ print(f"--- Running SHAP Explanation ({SHAP_ALGORITHM}) ---")
 
 # Print shapes for debugging
 print(f"X_temporal_array shape: {X_temporal_array.shape}")
-if X_static_array is not None:
-    print(f"X_static_array shape: {X_static_array.shape}")
+print(f"X_static_array shape: {X_static_array.shape}")
 
 # Extract shape information for feature naming
 if len(X_temporal_array.shape) == 3:  # (batch, sequence, features)
@@ -401,6 +402,12 @@ if len(X_temporal_array.shape) == 3:  # (batch, sequence, features)
         for feat_idx, feat_name in enumerate(temporal_features):
             # Create more descriptive feature names with time indices
             feature_names_flat.append(f"{feat_name}_t-{seq_len-1-t}")
+
+    # Add static feature names if available
+    if static_features is not None and len(static_features) > 0:
+        feature_names_flat.extend(static_features)
+        print(f"Added {len(static_features)} static features to feature_names_flat")
+
     print(f"Created {len(feature_names_flat)} feature names")
 else:
     print(f"Data array shape: {X_temporal_array.shape}")
@@ -413,7 +420,17 @@ else:
     for t in range(seq_len):
         for feat_idx, feat_name in enumerate(temporal_features):
             feature_names_flat.append(f"{feat_name}_t-{seq_len-1-t}")
+
+    # Add static feature names if available
+    if static_features is not None and len(static_features) > 0:
+        feature_names_flat.extend(static_features)
+        print(f"Added {len(static_features)} static features to feature_names_flat")
+
     print(f"Created {len(feature_names_flat)} feature names")
+
+# Calculate total number of features (temporal + static)
+total_features = len(feature_names_flat)
+print(f"Total number of features (temporal + static): {total_features}")
 
 # %% [markdown]
 # ### 6.2 SHAP Explanation - Background Data Preparation
@@ -428,111 +445,69 @@ background_data = (X_temporal_bg, X_static_bg)
 
 print(f"Initializing SHAP explainer with {SHAP_ALGORITHM} algorithm using {X_temporal_bg.shape[0]} background samples from TRAIN set...")
 print(f"Background data temporal shape: {X_temporal_bg.shape}")
-if X_static_bg is not None:
-    print(f"Background data static shape: {X_static_bg.shape}")
+print(f"Background data static shape: {X_static_bg.shape}")
 
 # %% [markdown]
 # ### 6.3 SHAP Explanation - Model Wrapper Setup
+# Define the custom model wrapper function that properly handles combined temporal and static features
 
 # %%
-# Define the custom model wrapper function
-# Note: This needs X_static_explain to be defined in the scope before this cell is run
-# We will define X_static_explain in the next step (6.4) and then initialize the explainer.
-# Make sure model is in evaluation mode to disable batch norm statistics updates
-model.eval()
-
 def custom_model_wrapper(x_input, return_pytorch_tensor=False):
-    """Custom wrapper for the model that passes inputs directly to model, handling 1D/2D inputs.
+    """Custom wrapper for the model that handles combined temporal and static features.
 
     Args:
-        x_input: Input data, can be numpy array or PyTorch tensor
+        x_input: Combined input data (temporal + static features), can be numpy array or PyTorch tensor
         return_pytorch_tensor: If True, return PyTorch tensor (for GradientExplainer),
-                              otherwise return numpy array (for KernelExplainer)
+                               otherwise return numpy array (for KernelExplainer)
     """
     # Handle both numpy arrays and PyTorch tensors as input
     if isinstance(x_input, torch.Tensor):
-        x_tensor = x_input
+        x_combined = x_input
         is_pytorch_input = True
     else:
         # Ensure input is numpy array
-        x_input_np = np.asarray(x_input)
+        x_combined = np.asarray(x_input)
         is_pytorch_input = False
 
         # Add batch dimension if input is 1D (single instance)
-        if x_input_np.ndim == 1:
-            x_input_np = x_input_np.reshape(1, -1)
+        if x_combined.ndim == 1:
+            x_combined = x_combined.reshape(1, -1)
             is_single_instance = True
         else:
             is_single_instance = False
 
         # Create a tensor from input
-        x_tensor = torch.tensor(x_input_np, dtype=torch.float32).to(device)
+        x_combined = torch.tensor(x_combined, dtype=torch.float32).to(device)
 
-    # --- Reshape flattened input for the model ---
-    # SHAP passes flattened input (batch_size, seq_len * n_features) for KernelExplainer
-    # or already 3D input (batch_size, seq_len, n_features) for GradientExplainer
-    # Check if reshaping is needed
-    if len(x_tensor.shape) == 2 and x_tensor.shape[1] == len(temporal_features) * LOOKBACK:
-        # Input is flattened, reshape to 3D
-        batch_size = x_tensor.shape[0]
-        expected_n_temporal_features = len(temporal_features) # Get number of features from global scope
-        expected_seq_len = LOOKBACK # Get lookback/seq_len from global scope
+    # Get shapes from global variables
+    batch_size = x_combined.shape[0]
+    n_temporal_features = len(temporal_features)
+    seq_len = LOOKBACK
+    n_static_features = len(static_features)
 
-        # Check if the flattened dimension matches expectations
-        if x_tensor.shape[1] != expected_seq_len * expected_n_temporal_features:
-            raise ValueError(
-                f"Input tensor flattened dimension ({x_tensor.shape[1]}) does not match "
-                f"expected ({expected_seq_len} * {expected_n_temporal_features}). Check LOOKBACK and temporal_features."
-            )
+    # Calculate total number of elements in combined features
+    total_temporal_elements = seq_len * n_temporal_features
+    total_elements = total_temporal_elements + n_static_features
 
-        x_tensor_reshaped = x_tensor.reshape(batch_size, expected_seq_len, expected_n_temporal_features)
-    else:
-        # Input is already in expected shape
-        x_tensor_reshaped = x_tensor
-    # ---------------------------------------------
+    # Validate input dimensions
+    if x_combined.shape[1] != total_elements:
+        raise ValueError(
+            f"Input tensor dimension ({x_combined.shape[1]}) does not match expected "
+            f"({total_temporal_elements} + {n_static_features} = {total_elements}). "
+            f"Check LOOKBACK, temporal_features, and static_features."
+        )
 
-    # Get static features if available
-    static_tensor = None
-    if X_static_array is not None:
-        # Important: we need to repeat static features for each row in x_tensor
-        # Get a slice of static features with the right size
-        # The batch_size here is determined by the input x_tensor, which might be different from the original explain batch
-        current_batch_size = x_tensor_reshaped.shape[0] # Use reshaped tensor's batch size
+    # Split the combined input into temporal and static parts
+    x_temporal_flat = x_combined[:, :total_temporal_elements]
+    x_static = x_combined[:, total_temporal_elements:]
 
-        # Select the appropriate static features based on input indices
-        # If input x_input corresponds to rows k, k+1,... from the original dataset,
-        # we need static features for rows k, k+1, ...
-        # SHAP doesn't easily provide original indices, so we might need to rely on repetition
-        # or assume the order matches the original data slice used for explanation.
-
-        # Use the indices corresponding to the explanation data slice
-        # Ensure X_static_explain is defined before this function is called!
-        static_features_to_use = X_static_explain
-
-        # Repeat static features if the model wrapper receives a larger batch than available static data
-        # This usually happens during SHAP's background processing
-        if current_batch_size > static_features_to_use.shape[0]:
-            repeat_factor = (current_batch_size // static_features_to_use.shape[0]) + 1
-            expanded_static = np.repeat(static_features_to_use, repeat_factor, axis=0)
-            static_features_to_use = expanded_static[:current_batch_size]
-        elif current_batch_size < static_features_to_use.shape[0]:
-                # If processing a single instance or smaller batch, take the corresponding static features
-                # This assumes the order in x_input matches the order in X_temporal_explain
-                # If it's a single instance, take the first row (this might be an approximation)
-                if not is_pytorch_input and is_single_instance:
-                    static_features_to_use = static_features_to_use[[0], :] # Take first row, keep 2D
-                else: # Otherwise, take the first batch_size rows
-                    static_features_to_use = static_features_to_use[:current_batch_size]
-
-        static_tensor = torch.tensor(
-            static_features_to_use,
-            dtype=torch.float32
-        ).to(device)
+    # Reshape temporal features to 3D
+    x_temporal = x_temporal_flat.reshape(batch_size, seq_len, n_temporal_features)
 
     # Forward pass through the model
     if return_pytorch_tensor:
         # For GradientExplainer mode - return tensor directly (with gradient tracking)
-        outputs = model(x_tensor_reshaped, static_tensor)
+        outputs = model(x_temporal, x_static)
         # Ensure outputs have shape (batch_size, num_outputs)
         if len(outputs.shape) == 1:
             # If output is 1D (e.g., single output value per sample), add a dimension
@@ -541,8 +516,7 @@ def custom_model_wrapper(x_input, return_pytorch_tensor=False):
     else:
         # For KernelExplainer mode - return numpy array (no gradient tracking)
         with torch.no_grad():
-            # Use the reshaped tensor here
-            output = model(x_tensor_reshaped, static_tensor)
+            output = model(x_temporal, x_static)
 
         # Return numpy array
         result = output.cpu().numpy()
@@ -554,7 +528,7 @@ def custom_model_wrapper(x_input, return_pytorch_tensor=False):
         # or (batch_size, n_outputs) for batch explanations.
         return final_result
 
-print("Custom model wrapper defined.")
+print("Updated custom model wrapper defined.")
 
 # %% [markdown]
 # ### 6.4 SHAP Explanation - Prepare Explanation Data & Initialize Explainer
@@ -574,104 +548,119 @@ print(f"Explanation temporal data shape: {X_temporal_explain.shape}")
 X_static_explain = X_static_array[explain_indices]
 print(f"Explanation static data shape: {X_static_explain.shape}")
 
-# --- 2. Set Wrapper & Initialize Explainer ---
-# custom_model_wrapper should be defined in the previous cell
-# Set the custom model wrapper (it now has access to X_static_explain)
+# --- 2. Combine Temporal and Static Features for SHAP ---
+# Flatten temporal data
+batch_size, seq_len, n_features = X_temporal_explain.shape
+X_temporal_flat = X_temporal_explain.reshape(batch_size, -1)
+
+# Combine flattened temporal and static data
+X_combined_explain = np.concatenate([X_temporal_flat, X_static_explain], axis=1)
+print(f"Combined explanation data shape: {X_combined_explain.shape}")
+
+# Similarly, combine background data
+batch_size_bg, seq_len_bg, n_features_bg = X_temporal_bg.shape
+X_temporal_bg_flat = X_temporal_bg.reshape(batch_size_bg, -1)
+X_combined_bg = np.concatenate([X_temporal_bg_flat, X_static_bg], axis=1)
+print(f"Combined background data shape: {X_combined_bg.shape}")
+
+# --- 3. Set Wrapper & Initialize Explainer ---
 print("Setting custom model wrapper...")
 explainer.set_custom_model_wrapper(custom_model_wrapper)
 
-# Prepare background data for explainer initialization
-# background_data tuple was defined in cell 6.2
-X_temporal_bg_init = background_data[0] # Extract temporal part
-# Flatten background temporal data if using KernelExplainer
-if SHAP_ALGORITHM == 'kernel' and len(X_temporal_bg_init.shape) == 3:
-    print("Flattening background temporal data for KernelExplainer initialization...")
-    X_temporal_bg_init = X_temporal_bg_init.reshape(X_temporal_bg_init.shape[0], -1)
-    print(f"Flattened background shape for init: {X_temporal_bg_init.shape}")
-
-# Initialize the explainer using the (potentially flattened) background temporal data
+# Initialize the explainer using the combined background data
 print("Initializing explainer...")
-explainer.initialize_explainer((X_temporal_bg_init, background_data[1]), algorithm=SHAP_ALGORITHM)
+explainer.initialize_explainer(X_combined_bg, algorithm=SHAP_ALGORITHM)
 print("Explainer initialized.")
 
 # %% [markdown]
 # ### 6.5 SHAP Explanation - Calculate SHAP Values
 
 # %%
-# Prepare explanation data tuple
-# Use the X_temporal_explain and X_static_explain defined above
-explain_data = (X_temporal_explain, X_static_explain)
-
-# Special preprocessing for KernelExplainer which requires 2D inputs
-# Use the variables defined in the previous cell
-if SHAP_ALGORITHM == 'kernel' and len(X_temporal_explain.shape) == 3:
-    print("Flattening temporal data for KernelExplainer (requires 2D input)...")
-    X_temporal_flat = X_temporal_explain.reshape(X_temporal_explain.shape[0], -1)
-    # Recreate explain_data tuple with flattened temporal data
-    explain_data = (X_temporal_flat, X_static_explain)
-    print(f"Flattened shape for KernelExplainer: {X_temporal_flat.shape}")
-
-# Calculate SHAP values
+# Use the combined explanation data created in the previous cell
 print(f"Calculating SHAP values for {explain_size} samples... (This might take a while)")
-shap_values = explainer.explain_batch(explain_data)
+
+# Calculate SHAP values using the combined data
+shap_values = explainer.explain_batch(X_combined_explain)
 print(f"SHAP values calculated. SHAP values shape: {shap_values.shape}")
+
+# When preparing for visualization, we'll need to separate the SHAP values for temporal and static features
+n_temporal_elements = seq_len * n_features
+n_static_elements = X_static_explain.shape[1]
+
+# Split SHAP values into temporal and static parts if needed for visualization
+if shap_values.shape[1] == n_temporal_elements + n_static_elements:
+    print("Splitting SHAP values into temporal and static components for visualization...")
+    temporal_shap_values = shap_values[:, :n_temporal_elements]
+    static_shap_values = shap_values[:, n_temporal_elements:]
+    print(f"Temporal SHAP values shape: {temporal_shap_values.shape}")
+    print(f"Static SHAP values shape: {static_shap_values.shape}")
+else:
+    print(f"Warning: SHAP values shape {shap_values.shape} doesn't match expected combined dimension {n_temporal_elements + n_static_elements}")
+    temporal_shap_values = shap_values
+    static_shap_values = None
 
 # %% [markdown]
 # ### 6.6 SHAP Explanation - Prepare Visualization Data
 
 # %%
-# For visualization, we need to handle the data differently based on algorithm
-print(f"Preparing visualization data for {SHAP_ALGORITHM} algorithm...")
+# For visualization, prepare feature names for both temporal and static features
+print("Preparing visualization data...")
 
-if SHAP_ALGORITHM == 'gradient':
-    # For gradient algorithm, we try to preserve the 3D structure if possible
-    if len(X_temporal_explain.shape) == 3 and len(shap_values.shape) == 3:
-        print(f"Using 3D SHAP values with shape {shap_values.shape} for temporal analysis")
-        # Create a 3D-aware visualization
+# Verify we have the correct feature names
+print(f"Number of temporal features: {len(temporal_features)}")
+print(f"Number of static features: {len(static_features or [])}")
+print(f"Total number of feature names: {len(feature_names_flat)}")
 
-        # For summary plot we still need to flatten data
-        X_flat = X_temporal_explain.reshape(explain_size, -1)
-        shap_values_flat = shap_values.reshape(explain_size, -1)
+# For visualization, we'll use the flattened temporal data and static data
+X_flat_for_viz = X_combined_explain
+shap_values_for_viz = shap_values
 
-        # Save the original 3D structure for possible time-based visualizations
-        X_3d = X_temporal_explain
-        shap_values_3d = shap_values
+# Verify dimensions match between data and feature names
+if len(feature_names_flat) != X_flat_for_viz.shape[1]:
+    print(f"Warning: Mismatch between feature names ({len(feature_names_flat)}) and data dimension ({X_flat_for_viz.shape[1]})")
 
-        print(f"Also created flattened representation - X_flat: {X_flat.shape}, shap_values_flat: {shap_values_flat.shape}")
+    # Calculate expected feature counts
+    temporal_features_count = len(temporal_features) * seq_len
+    static_features_count = len(static_features or [])
+    expected_total = temporal_features_count + static_features_count
+    print(f"Expected feature breakdown: {temporal_features_count} temporal + {static_features_count} static = {expected_total}")
+
+    # Adjust feature names list if needed
+    if len(feature_names_flat) > X_flat_for_viz.shape[1]:
+        print(f"Truncating feature names from {len(feature_names_flat)} to {X_flat_for_viz.shape[1]}")
+        feature_names_flat = feature_names_flat[:X_flat_for_viz.shape[1]]
     else:
-        print(f"SHAP values shape: {shap_values.shape} doesn't match expected 3D structure, flattening data")
-        # Fall back to flattening if structures don't match
-        X_flat = X_temporal_explain.reshape(explain_size, -1) if len(X_temporal_explain.shape) > 2 else X_temporal_explain
-        shap_values_flat = shap_values.reshape(explain_size, -1) if len(shap_values.shape) > 2 else shap_values
-else:
-    # For kernel algorithm, data is always flattened
-    if len(X_temporal_explain.shape) == 3:  # 3D data (batch, seq, features)
-        X_flat = X_temporal_explain.reshape(explain_size, -1)
-        shap_values_flat = shap_values.reshape(explain_size, -1)
-    elif len(X_temporal_explain.shape) > 3:  # e.g., CNN input (batch, seq, h, w)
-        X_flat = X_temporal_explain.reshape(explain_size, -1)
-        shap_values_flat = shap_values.reshape(explain_size, -1)
-        # Create meaningful feature names for flattened data if possible
-        # This part might need customization based on the exact CNN structure
-        feature_names_flat = [f'pixel_{i}' for i in range(X_flat.shape[1])]
-    else: # Already 2D data (batch, features)
-        X_flat = X_temporal_explain
-        shap_values_flat = shap_values
+        # If we have fewer feature names than columns, add generic names for the rest
+        print(f"Adding generic names for missing features")
+        for i in range(len(feature_names_flat), X_flat_for_viz.shape[1]):
+            feature_names_flat.append(f'feature_{i}')
 
-# Add static features if they exist
-if X_static_array is not None:
-    # Use the actual static explain data from our tuple
-    print("Note: Static feature SHAP values might require model-specific handling.")
-    # Example: Concatenate static features if explainer provides values for them
-    # X_flat = np.concatenate((X_flat, X_static_explain), axis=1)
-    # feature_names_flat += static_features
-    # shap_values_flat = np.concatenate((shap_values_flat, shap_values_static), axis=1) # If available
+# For 3D visualizations (if needed later)
+if SHAP_ALGORITHM == 'gradient':
+    # For gradient algorithm, try to reshape temporal SHAP values back to 3D
+    try:
+        n_temporal_elements = seq_len * len(temporal_features)
+        if shap_values.shape[1] >= n_temporal_elements:
+            # Extract just the temporal part of SHAP values
+            temporal_shap_values = shap_values[:, :n_temporal_elements]
+            explain_size = temporal_shap_values.shape[0]
+            # Reshape temporal part to 3D
+            shap_values_3d = temporal_shap_values.reshape(explain_size, seq_len, len(temporal_features))
+            X_3d = X_temporal_explain
+            print(f"Reshaped temporal SHAP values to 3D: {shap_values_3d.shape}")
 
-# Ensure feature names match dimensions
-if len(feature_names_flat) != X_flat.shape[1]:
-    print(f"Warning: Mismatch between number of feature names ({len(feature_names_flat)}) and data dimension ({X_flat.shape[1]}). Adjusting feature names.")
-    # Fallback: generic feature names
-    feature_names_flat = [f'feature_{i}' for i in range(X_flat.shape[1])]
+            # If static features exist, extract their SHAP values too
+            if len(static_features or []) > 0:
+                static_shap_values = shap_values[:, n_temporal_elements:]
+                print(f"Static SHAP values shape: {static_shap_values.shape}")
+        else:
+            print(f"Warning: SHAP values shape {shap_values.shape} doesn't have enough elements for temporal reshaping")
+            shap_values_3d = None
+            X_3d = None
+    except Exception as e:
+        print(f"Could not reshape temporal SHAP values to 3D: {e}")
+        shap_values_3d = None
+        X_3d = None
 
 # %% [markdown]
 # ### 6.7 SHAP Explanation - Create Summary Plot
@@ -683,28 +672,28 @@ plt.figure()
 
 # Ensure shap_values and X_flat match in dimensions and are properly shaped for summary_plot
 # If we get multi-dimensional arrays, we need to flatten them correctly
-if len(shap_values_flat.shape) > 2:
-    print(f"Reshaping multi-dimensional SHAP values from {shap_values_flat.shape} to 2D")
-    shap_values_flat = shap_values_flat.reshape(shap_values_flat.shape[0], -1)
+if len(shap_values_for_viz.shape) > 2:
+    print(f"Reshaping multi-dimensional SHAP values from {shap_values_for_viz.shape} to 2D")
+    shap_values_for_viz = shap_values_for_viz.reshape(shap_values_for_viz.shape[0], -1)
 
-if len(X_flat.shape) > 2:
-    print(f"Reshaping multi-dimensional X_flat from {X_flat.shape} to 2D")
-    X_flat = X_flat.reshape(X_flat.shape[0], -1)
+if len(X_flat_for_viz.shape) > 2:
+    print(f"Reshaping multi-dimensional X_flat from {X_flat_for_viz.shape} to 2D")
+    X_flat_for_viz = X_flat_for_viz.reshape(X_flat_for_viz.shape[0], -1)
 
 # Check if dimensions match
-if shap_values_flat.shape[1] != X_flat.shape[1]:
-    print(f"Warning: Mismatch between SHAP values shape {shap_values_flat.shape} and feature shape {X_flat.shape}")
+if shap_values_for_viz.shape[1] != X_flat_for_viz.shape[1]:
+    print(f"Warning: Mismatch between SHAP values shape {shap_values_for_viz.shape} and feature shape {X_flat_for_viz.shape}")
     # Adjust feature dimensions if needed
-    min_dim = min(shap_values_flat.shape[1], X_flat.shape[1])
-    shap_values_flat = shap_values_flat[:, :min_dim]
-    X_flat = X_flat[:, :min_dim]
+    min_dim = min(shap_values_for_viz.shape[1], X_flat_for_viz.shape[1])
+    shap_values_for_viz = shap_values_for_viz[:, :min_dim]
+    X_flat_for_viz = X_flat_for_viz[:, :min_dim]
     feature_names_flat = feature_names_flat[:min_dim]
 
-print(f"Final shapes - SHAP values: {shap_values_flat.shape}, X_flat: {X_flat.shape}, feature names: {len(feature_names_flat)}")
+print(f"Final shapes - SHAP values: {shap_values_for_viz.shape}, X_flat: {X_flat_for_viz.shape}, feature names: {len(feature_names_flat)}")
 
 shap.summary_plot(
-    shap_values_flat,
-    X_flat,
+    shap_values_for_viz,
+    X_flat_for_viz,
     feature_names=feature_names_flat,
     max_display=20,
     show=False
@@ -726,7 +715,7 @@ print("Generating feature importance plot...")
 
 # Calculate mean absolute SHAP value for each feature
 # Ensure feature_importance is 1-dimensional
-feature_importance = np.abs(shap_values_flat).mean(axis=0)
+feature_importance = np.abs(shap_values_for_viz).mean(axis=0)
 if len(feature_importance.shape) > 1:
     print(f"Flattening feature_importance from {feature_importance.shape}")
     feature_importance = feature_importance.flatten()
@@ -746,8 +735,8 @@ else:
 
 # Create a new shap_values array that matches the expected format for plot_feature_importance
 # The function expects the original shap_values array to calculate the mean abs value internally
-shap_values_adjusted = np.zeros((explain_size, len(feature_names_adjusted)))
-for i in range(explain_size):
+shap_values_adjusted = np.zeros((shap_values_for_viz.shape[0], len(feature_names_adjusted)))
+for i in range(shap_values_for_viz.shape[0]):
     shap_values_adjusted[i] = feature_importance  # Each row is the same
 
 # Now plot using the properly dimensioned arrays
@@ -807,6 +796,7 @@ if has_3d_data:
     # Calculate feature importance across time steps
     batch_size, seq_len, n_features = shap_values_3d.shape
     temporal_importance = np.abs(shap_values_3d).mean(axis=0)  # Shape: (seq_len, n_features)
+    print(f"Temporal importance shape: {temporal_importance.shape}, should be ({seq_len}, {n_features})")
 
     # Create a plot showing feature importance across time steps
     plt.figure(figsize=(12, 8))
@@ -836,18 +826,32 @@ if has_3d_data:
 
     # Create line plots for top features across time
     # Identify top N features based on overall importance
-    top_n = 10
-    top_features_idx = np.argsort(np.mean(temporal_importance, axis=0))[-top_n:]
+    top_n = min(10, n_features)
+    # Calculate mean importance per feature across all time steps
+    feature_avg_importance = np.mean(temporal_importance, axis=0)  # Shape: (n_features,)
+    print(f"Feature average importance shape: {feature_avg_importance.shape}")
+    # Get indices of top N features by importance
+    top_features_idx = np.argsort(feature_avg_importance)[-top_n:]
+    print(f"Top {top_n} feature indices: {top_features_idx}")
 
     plt.figure(figsize=(12, 6))
+
+    # Create x-axis values for plotting - using integers from 0 to seq_len-1
+    x_values = np.arange(seq_len)
+
+    # Plot each top feature's importance over time
     for i, feat_idx in enumerate(top_features_idx):
         feat_name = temporal_features[feat_idx]
-        plt.plot(time_labels, temporal_importance[:, feat_idx],
-                marker='o', linewidth=2, label=feat_name)
+        # Extract this feature's importance at each time step
+        importance_over_time = temporal_importance[:, feat_idx]
+        print(f"Feature '{feat_name}' importance shape: {importance_over_time.shape}")
+        # Plot this feature's line
+        plt.plot(x_values, importance_over_time, marker='o', linewidth=2, label=feat_name)
 
     plt.xlabel('Time Step')
     plt.ylabel('Feature Importance (Mean |SHAP Value|)')
     plt.title(f'Top {top_n} Features Importance Across Time ({SHAP_ALGORITHM.capitalize()})')
+    plt.xticks(x_values, time_labels)
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
@@ -862,11 +866,12 @@ else:
     print("Skipping temporal analysis (requires 3D data structures)")
 
 # %% [markdown]
-# ### 7. Sensitivity Analysis (Alternative to SHAP)
+# ### 7. Sensitivity Analysis (Alternative to SHAP Gradient)
 
 # %%
 print("--- Running Sensitivity Analysis ---")
 
+# Initialize the sensitivity analyzer
 explainer = SensitivityAnalyzer(model, temporal_features, static_features)
 
 # Analyze feature sensitivity
