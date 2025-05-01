@@ -77,7 +77,7 @@ class ShapExplainer(BaseExplainer):
 
         Args:
             background_data: Tuple of (X_temporal, X_static) numpy arrays to use as background data
-            algorithm: SHAP algorithm to use ('kernel', 'deep', or 'gradient')
+            algorithm: SHAP algorithm to use ('kernel' or 'gradient')
         """
         self.algorithm = algorithm
         X_temporal_bg, X_static_bg = background_data
@@ -125,25 +125,81 @@ class ShapExplainer(BaseExplainer):
         if algorithm == "kernel":
             # For black-box models
             self.explainer = shap.KernelExplainer(model_wrapper, X_temporal_bg, feature_names=self.feature_names)
-        elif algorithm == "deep":
-            # For deep learning models
-            # Convert model to PyTorch model for DeepExplainer
-            def model_pytorch(x):
-                x_tensor = torch.tensor(x, dtype=torch.float32).to(self.device)
-                return self.model(x_tensor, None)
-
-            self.explainer = shap.DeepExplainer(model_pytorch,
-                torch.tensor(X_temporal_bg, dtype=torch.float32).to(self.device), )
         elif algorithm == "gradient":
             # For gradient-based models
-            # Convert model to PyTorch model for GradientExplainer
-            def model_pytorch(x):
-                x_tensor = torch.tensor(x, dtype=torch.float32).to(self.device)
-                return self.model(x_tensor, None)
+            # Convert background data to temporal tensor for GradientExplainer
+            temporal_bg_tensor = torch.tensor(X_temporal_bg, dtype=torch.float32).to(self.device)
 
-            self.explainer = shap.GradientExplainer(model_pytorch, torch.tensor(X_temporal_bg, dtype=torch.float32).to(self.device))
+            # For GradientExplainer, we need a proper torch.nn.Module to ensure correct framework detection
+            class PyTorchModelWrapper(torch.nn.Module):
+                def __init__(self, orig_model, custom_wrapper, static_tensor, device, use_custom):
+                    super().__init__()
+                    self.orig_model = orig_model
+                    self.custom_wrapper = custom_wrapper
+                    self.static_tensor = static_tensor
+                    self.device = device
+                    self.use_custom = use_custom
+
+                def forward(self, x):
+                    if self.use_custom and self.custom_wrapper is not None:
+                        # Use the custom wrapper with return_pytorch_tensor=True
+                        outputs = self.custom_wrapper(x, return_pytorch_tensor=True)
+                        # Ensure outputs have shape (batch_size, num_outputs)
+                        if len(outputs.shape) == 1:
+                            # If output is 1D (e.g., single output value per sample)
+                            outputs = outputs.unsqueeze(1)  # Add a dimension to make it (batch_size, 1)
+                        return outputs
+                    else:
+                        # Default behavior - manage static tensor ourselves
+                        batch_size = x.shape[0]
+                        static_tensor_for_batch = None
+
+                        if self.static_tensor is not None:
+                            if batch_size <= self.static_tensor.shape[0]:
+                                static_tensor_for_batch = self.static_tensor[:batch_size]
+                            else:
+                                # Handle unexpected larger batch size
+                                repeat_factor = (batch_size + self.static_tensor.shape[0] - 1) // self.static_tensor.shape[0]
+                                static_tensor_for_batch = self.static_tensor.repeat(repeat_factor, 1)[:batch_size]
+
+                        # Call the original model
+                        outputs = self.orig_model(x, static_tensor_for_batch)
+                        # Ensure outputs have shape (batch_size, num_outputs)
+                        if len(outputs.shape) == 1:
+                            # If output is 1D (e.g., single output value per sample)
+                            outputs = outputs.unsqueeze(1)  # Add a dimension to make it (batch_size, 1)
+                        return outputs
+
+            # Prepare static tensor
+            static_bg_tensor = None
+            if X_static_bg is not None:
+                static_bg_tensor = torch.tensor(X_static_bg, dtype=torch.float32).to(self.device)
+
+            # Create the module wrapper
+            if self.custom_model_wrapper is not None:
+                print("Using custom model wrapper with PyTorchModelWrapper for GradientExplainer")
+                wrapped_model = PyTorchModelWrapper(
+                    self.model,
+                    self.custom_model_wrapper,
+                    static_bg_tensor,
+                    self.device,
+                    use_custom=True
+                )
+            else:
+                print("Using default PyTorchModelWrapper for GradientExplainer")
+                wrapped_model = PyTorchModelWrapper(
+                    self.model,
+                    None,
+                    static_bg_tensor,
+                    self.device,
+                    use_custom=False
+                )
+
+            # Initialize GradientExplainer with the PyTorch module wrapper
+            print(f"Initializing GradientExplainer with PyTorchModelWrapper. Temporal background shape: {temporal_bg_tensor.shape}")
+            self.explainer = shap.GradientExplainer(wrapped_model, temporal_bg_tensor)
         else:
-            raise ValueError(f"Unsupported SHAP algorithm: {algorithm}")
+            raise ValueError(f"Unsupported SHAP algorithm: {algorithm}. Use 'kernel' or 'gradient'.")
 
     def explain_batch(self, batch_data: Tuple[np.ndarray, Optional[np.ndarray]]) -> np.ndarray:
         """Explain a batch of samples using SHAP.
@@ -159,21 +215,78 @@ class ShapExplainer(BaseExplainer):
 
         X_temporal, X_static = batch_data
 
-        if self.algorithm in ["deep", "gradient"]:
-            # DeepExplainer and GradientExplainer expect PyTorch tensors
+        if self.algorithm == "gradient":
+            # GradientExplainer expects PyTorch tensors
             x_tensor = torch.tensor(X_temporal, dtype=torch.float32).to(self.device)
-            shap_values = self.explainer.shap_values(x_tensor)
+
+            # Print debug info about tensor shapes
+            print(f"Input tensor shape for explainer: {x_tensor.shape}")
+            print(f"Using algorithm: {self.algorithm}")
+            # Directly call the proper method
+
+            print("Calling GradientExplainer.shap_values...")
+            # For gradient explainer, we maintain 3D structure for temporal analysis
+            # We explicitly do NOT flatten the input for gradient explainer
+            if len(x_tensor.shape) == 3:
+                print(f"Using 3D input with shape {x_tensor.shape} for gradient explainer")
+                shap_values = self.explainer.shap_values(x_tensor)
+            else:
+                # If input is already 2D, use it as is
+                print(f"Using input with shape {x_tensor.shape} for gradient explainer")
+                shap_values = self.explainer.shap_values(x_tensor)
 
             # Convert to numpy if needed
             if isinstance(shap_values, torch.Tensor):
+                print(f"Converting PyTorch tensor with shape {shap_values.shape} to numpy")
                 shap_values = shap_values.cpu().numpy()
             elif isinstance(shap_values, list):
                 # Some explainers return a list of arrays (one per output)
                 # We take the first one (assuming single output)
+                print(f"Taking first element from list of {len(shap_values)} SHAP values")
                 shap_values = shap_values[0]
+                if isinstance(shap_values, torch.Tensor):
+                    print(f"Converting PyTorch tensor with shape {shap_values.shape} to numpy")
+                    shap_values = shap_values.cpu().numpy()
+
+            # For gradient explainer, make sure we preserve the output shape to match input
+            # If input is 3D and output shape doesn't match, try to reshape
+            if len(x_tensor.shape) == 3 and len(shap_values.shape) > 1:
+                orig_shape = x_tensor.shape
+                if shap_values.shape[1:] != orig_shape[1:]:
+                    print(f"Reshaping SHAP values: {shap_values.shape} -> ({orig_shape[0]}, {orig_shape[1]}, {orig_shape[2]})")
+                    try:
+                        # Try to reshape to match original 3D input
+                        shap_values = shap_values.reshape(orig_shape)
+                    except Exception as reshape_err:
+                        print(f"Warning: Could not reshape SHAP values: {str(reshape_err)}")
+                        # Don't fail completely, just warn and continue
+
+            print(f"Final SHAP values shape: {shap_values.shape}")
+
         else:
             # KernelExplainer works with numpy arrays
-            shap_values = self.explainer.shap_values(X_temporal)
+            # For KernelExplainer, we DO need to flatten 3D input
+            if len(X_temporal.shape) == 3:
+                print(f"Flattening 3D input with shape {X_temporal.shape} for kernel explainer")
+                batch_size = X_temporal.shape[0]
+                X_temporal_flat = X_temporal.reshape(batch_size, -1)
+                shap_values = self.explainer.shap_values(X_temporal_flat)
+
+                # Attempt to reshape the output back to 3D if needed
+                try:
+                    # If shap_values is a list (multi-output model)
+                    if isinstance(shap_values, list):
+                        shap_values = shap_values[0]
+
+                    # Try to reshape back to original 3D shape for consistency
+                    if len(shap_values.shape) == 2:  # Should be (batch_size, flattened_features)
+                        print(f"Reshaping kernel SHAP values back to 3D: {shap_values.shape} -> {X_temporal.shape}")
+                        shap_values = shap_values.reshape(X_temporal.shape)
+                except Exception as reshape_err:
+                    print(f"Warning: Could not reshape kernel SHAP values back to 3D: {str(reshape_err)}")
+            else:
+                # Already 2D input
+                shap_values = self.explainer.shap_values(X_temporal)
 
             # Some explainers return a list of arrays (one per output)
             # We take the first one (assuming single output)
@@ -394,120 +507,3 @@ class SensitivityAnalyzer(BaseExplainer):
             plt.show()
 
         return fig
-
-
-class MLPExplainer(ShapExplainer):
-    """Explainer specialized for MLP models."""
-
-    def __init__(self, model: torch.nn.Module, feature_names: List[str], static_feature_names: Optional[List[str]] = None):
-        """Initialize the MLP explainer.
-
-        Args:
-            model: Trained MLP model
-            feature_names: List of names for temporal features
-            static_feature_names: List of names for static features (if any)
-        """
-        super().__init__(model, feature_names, static_feature_names)
-
-
-class LSTMExplainer(ShapExplainer):
-    """Explainer specialized for LSTM models."""
-
-    def __init__(self, model: torch.nn.Module, feature_names: List[str], static_feature_names: Optional[List[str]] = None):
-        """Initialize the LSTM explainer.
-
-        Args:
-            model: Trained LSTM model
-            feature_names: List of names for temporal features
-            static_feature_names: List of names for static features (if any)
-        """
-        super().__init__(model, feature_names, static_feature_names)
-
-
-class CNNLSTMExplainer(ShapExplainer):
-    """Explainer specialized for CNN-LSTM models."""
-
-    def __init__(self, model: torch.nn.Module, feature_names: List[str], static_feature_names: Optional[List[str]] = None):
-        """Initialize the CNN-LSTM explainer.
-
-        Args:
-            model: Trained CNN-LSTM model
-            feature_names: List of names for temporal features
-            static_feature_names: List of names for static features (if any)
-        """
-        super().__init__(model, feature_names, static_feature_names)
-
-
-class TransformerExplainer(ShapExplainer):
-    """Explainer specialized for Transformer models."""
-
-    def __init__(self, model: torch.nn.Module, feature_names: List[str], static_feature_names: Optional[List[str]] = None):
-        """Initialize the Transformer explainer.
-
-        Args:
-            model: Trained Transformer model
-            feature_names: List of names for temporal features
-            static_feature_names: List of names for static features (if any)
-        """
-        super().__init__(model, feature_names, static_feature_names)
-
-
-class InformerExplainer(ShapExplainer):
-    """Explainer specialized for Informer models."""
-
-    def __init__(self, model: torch.nn.Module, feature_names: List[str], static_feature_names: Optional[List[str]] = None):
-        """Initialize the Informer explainer.
-
-        Args:
-            model: Trained Informer model
-            feature_names: List of names for temporal features
-            static_feature_names: List of names for static features (if any)
-        """
-        super().__init__(model, feature_names, static_feature_names)
-
-
-def create_explainer(model_type: str, model: torch.nn.Module, feature_names: List[str],
-                     static_feature_names: Optional[List[str]] = None) -> BaseExplainer:
-    """Factory function to create the appropriate explainer based on model type.
-
-    Args:
-        model_type: Type of model ('mlp', 'lstm', 'cnn_lstm', 'transformer', 'informer')
-                   or model class name ('MLPModel', 'LSTMModel', etc.)
-        model: Trained model
-        feature_names: List of feature names
-        static_feature_names: List of static feature names (if any)
-
-    Returns:
-        Appropriate explainer instance for the model type
-    """
-    # Convert model class name to short model type name if needed
-    model_type_map = {
-        'MLPModel': 'mlp',
-        'LSTMModel': 'lstm',
-        'CNNLSTMModel': 'cnn_lstm',
-        'TransformerModel': 'transformer',
-        'InformerModel': 'informer'
-    }
-
-    # Check if model_type is a class name and convert it
-    if model_type in model_type_map:
-        print(f"Converting model class name '{model_type}' to model type '{model_type_map[model_type]}'")
-        model_type = model_type_map[model_type]
-
-    # Ensure model_type is lowercase for case-insensitive matching
-    model_type = model_type.lower()
-
-    if model_type == 'mlp':
-        return MLPExplainer(model, feature_names, static_feature_names)
-    elif model_type == 'lstm':
-        return LSTMExplainer(model, feature_names, static_feature_names)
-    elif model_type in ['cnn_lstm', 'cnnlstm']:
-        return CNNLSTMExplainer(model, feature_names, static_feature_names)
-    elif model_type == 'transformer':
-        return TransformerExplainer(model, feature_names, static_feature_names)
-    elif model_type == 'informer':
-        return InformerExplainer(model, feature_names, static_feature_names)
-    else:
-        # Default to sensitivity analyzer for unknown model types
-        print(f"Warning: Unknown model type '{model_type}'. Using sensitivity analyzer.")
-        return SensitivityAnalyzer(model, feature_names, static_feature_names)

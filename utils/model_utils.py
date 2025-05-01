@@ -348,6 +348,9 @@ def load_model(filepath, device=None, model_class=None):
     # Get initialization parameters from metadata
     model_init_params = metadata.get("model_init_params", {})
 
+    # Also check config for model parameters
+    config = metadata.get("config", {})
+
     # Filter model_init_params to remove problematic parameters
     filtered_params = {}
 
@@ -407,6 +410,57 @@ def load_model(filepath, device=None, model_class=None):
         # Continue with original parameters if inspection fails
         filtered_params = model_init_params
 
+    # Extract hyperparameters from the saved model state_dict
+    if model_class.__name__ == 'InformerModel':
+        # Try to extract hyperparameters from model state dictionary dimensions
+        if 'enc_embedding.weight' in state_dict:
+            input_dim = state_dict['enc_embedding.weight'].shape[1]
+            d_model = state_dict['enc_embedding.weight'].shape[0]
+            print(f"Extracted from state_dict: input_dim={input_dim}, d_model={d_model}")
+
+            # Update filtered params
+            if 'input_dim' in allowed_params:
+                filtered_params['input_dim'] = input_dim
+
+            if 'd_model' in allowed_params:
+                filtered_params['d_model'] = d_model
+
+        # Get number of heads from the in_proj_weight shape
+        if 'transformer_encoder.layers.0.self_attn.in_proj_weight' in state_dict:
+            in_proj_weight = state_dict['transformer_encoder.layers.0.self_attn.in_proj_weight']
+            # For transformer attention, in_proj_weight shape is [3*d_model, d_model] where first dimension is Q,K,V combined
+            n_heads = in_proj_weight.shape[0] // (3 * (in_proj_weight.shape[1] // 8))  # 8 is common dim per head
+            print(f"Estimated n_heads={n_heads} from state_dict")
+
+            if 'n_heads' in allowed_params:
+                filtered_params['n_heads'] = n_heads
+
+        # Get number of encoder layers by counting them in state_dict
+        e_layers = 0
+        for key in state_dict:
+            if 'transformer_encoder.layers.' in key:
+                layer_num = int(key.split('.')[2])
+                e_layers = max(e_layers, layer_num + 1)
+
+        if e_layers > 0 and 'e_layers' in allowed_params:
+            print(f"Detected e_layers={e_layers} from state_dict")
+            filtered_params['e_layers'] = e_layers
+
+        # Get feedforward dimension from linear1 weight
+        if 'transformer_encoder.layers.0.linear1.weight' in state_dict:
+            d_ff = state_dict['transformer_encoder.layers.0.linear1.weight'].shape[0]
+            print(f"Extracted d_ff={d_ff} from state_dict")
+
+            if 'd_ff' in allowed_params:
+                filtered_params['d_ff'] = d_ff
+
+        # Also check for existing hyperparameters in config
+        config_params = ['d_model', 'n_heads', 'e_layers', 'd_ff', 'dropout', 'activation']
+        for param in config_params:
+            if param in config and param in allowed_params and param not in filtered_params:
+                filtered_params[param] = config[param]
+                print(f"Using {param}={filtered_params[param]} from config")
+
     # Try to create model instance
     try:
         print(f"Creating model with parameters: {filtered_params}")
@@ -427,6 +481,30 @@ def load_model(filepath, device=None, model_class=None):
             except Exception as fallback_error:
                 print(f"Failed with fallback parameters: {fallback_error}")
                 raise ValueError(f"Could not instantiate model class {model_class.__name__}. Check model definition and parameters.")
+        elif model_class.__name__ == 'InformerModel':
+            print(f"Trying to create InformerModel with extracted parameters from state_dict...")
+            try:
+                # Get basic dimensions from state_dict
+                input_dim = state_dict['enc_embedding.weight'].shape[1]
+                d_model = state_dict['enc_embedding.weight'].shape[0]
+                static_dim = state_dict['static_proj.0.weight'].shape[1]
+                d_ff = state_dict['transformer_encoder.layers.0.linear1.weight'].shape[0]
+
+                # Create with extracted parameters
+                model = model_class(
+                    input_dim=input_dim,
+                    static_dim=static_dim,
+                    d_model=d_model,
+                    d_ff=d_ff,
+                    n_heads=n_heads if 'n_heads' in locals() else 8,
+                    e_layers=e_layers if 'e_layers' in locals() else 3,
+                    dropout=0.1,
+                    activation='gelu'
+                )
+                print(f"Created InformerModel with extracted parameters")
+            except Exception as fallback_error:
+                print(f"Failed with fallback parameters: {fallback_error}")
+                raise ValueError(f"Could not instantiate model class {model_class.__name__}. Check model definition and parameters.")
         else:
             raise ValueError(f"Could not instantiate model class {model_class.__name__}. Check model definition and parameters.")
 
@@ -437,8 +515,12 @@ def load_model(filepath, device=None, model_class=None):
         print(f"Error loading state dictionary: {e}")
         # Try with strict=False as fallback
         print("Trying to load state dictionary with strict=False...")
-        model.load_state_dict(state_dict, strict=False)
-        print("Warning: Model loaded with strict=False. Some parameters may not have been restored correctly.")
+        try:
+            model.load_state_dict(state_dict, strict=False)
+            print("Warning: Model loaded with strict=False. Some parameters may not have been restored correctly.")
+        except Exception as strict_false_error:
+            print(f"Error loading state dictionary with strict=False: {strict_false_error}")
+            raise
 
     # Move model to device
     model = model.to(device)
@@ -468,84 +550,6 @@ def load_model(filepath, device=None, model_class=None):
         print(f"  Weights & Biases run: {metadata['wandb_url']}")
 
     return model, metadata
-
-def prepare_data_for_model(data, model_metadata):
-    """
-    Prepare data for a loaded model with individual time features.
-
-    This function ensures that all required time features are available
-    in the data dictionary based on what the model expects.
-
-    Args:
-        data: Dictionary containing the input data
-        model_metadata: Metadata from the loaded model
-
-    Returns:
-        prepared_data: Dictionary with data properly formatted for the model
-    """
-    prepared_data = data.copy()
-
-    # Get time feature keys from model metadata
-    time_feature_keys = model_metadata.get('time_feature_keys', [
-        'hour_sin', 'hour_cos', 'day_sin', 'day_cos',
-        'month_sin', 'month_cos', 'dow_sin', 'dow_cos'
-    ])
-
-    # Check which time features are available in the data
-    available_time_features = [key for key in time_feature_keys if key in data]
-    missing_time_features = [key for key in time_feature_keys if key not in data]
-
-    # Report on available and missing time features
-    if available_time_features:
-        print(f"Available time features: {', '.join(available_time_features)}")
-
-    if missing_time_features:
-        print(f"Warning: Missing time features: {', '.join(missing_time_features)}")
-
-        # If timestamps are available, we can create the missing time features
-        if 'timestamps' in data:
-            print("Creating missing time features from timestamps")
-            from utils.normalize_utils import create_time_features
-            time_features_dict = create_time_features(data['timestamps'])
-
-            # Add only the missing time features
-            for key in missing_time_features:
-                if key in time_features_dict:
-                    prepared_data[key] = time_features_dict[key]
-                    print(f"  - Created {key} from timestamps")
-                else:
-                    print(f"  - Could not create {key}")
-
-    return prepared_data
-
-def load_model_and_prepare_data(model_path, data, device=None, model_class=None):
-    """
-    Load a model and prepare input data for it with appropriate time feature handling.
-
-    This function combines model loading and data preparation into a single step,
-    ensuring that the data has all the time features the model expects.
-
-    Args:
-        model_path: Path to the saved model file
-        data: Dictionary of input data
-        device: Device to load the model to (None for auto-detection)
-        model_class: Optional pre-loaded model class to use instead of importing dynamically
-
-    Returns:
-        model: Loaded PyTorch model
-        prepared_data: Data dictionary prepared for the model
-        metadata: Model metadata
-    """
-    # Load the model
-    model, metadata = load_model(model_path, device, model_class)
-
-    # Prepare data for the model
-    prepared_data = prepare_data_for_model(data, metadata)
-
-    # Report success
-    print(f"Model loaded and data prepared successfully")
-
-    return model, prepared_data, metadata
 
 def validate_time_features(data, required_time_features=None):
     """

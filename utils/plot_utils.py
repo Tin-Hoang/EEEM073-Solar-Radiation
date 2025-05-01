@@ -1367,7 +1367,7 @@ def plot_predictions_over_time(models, model_names, data_loader, target_scaler, 
 
     # Define colors and line styles for predictions
     colors = ['blue', 'red', 'green', 'magenta', 'cyan', 'orange']
-    line_styles = ['-', '--', ':', '-.', '--', ':']
+    line_styles = ['--', ':', '-.', '--', ':', '--']
 
     # Set x-axis values based on availability of time_index_local
     if x_values:
@@ -1472,5 +1472,6 @@ def plot_predictions_over_time(models, model_names, data_loader, target_scaler, 
     plt.tight_layout()
     # Save the figure
     os.makedirs('plots', exist_ok=True)
-    plt.savefig('plots/predictions_over_time.png')
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    plt.savefig(f'plots/predictions_over_time_{timestamp}.png')
     return fig
