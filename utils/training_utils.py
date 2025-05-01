@@ -9,7 +9,6 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import time
 
 from utils.wandb_utils import track_experiment, is_wandb_enabled
-from utils.model_utils import get_model_summary
 
 # Device configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -59,6 +58,9 @@ def train_model(
     best_val_loss = float('inf')
     counter = 0
     best_model_state = None
+
+    if debug_mode:
+        print("Debug mode is enabled. Only running 10 batches per epoch.")
 
     # Instead of wrapping epochs in tqdm, we'll manually print epoch progress
     for epoch in range(epochs):
@@ -140,7 +142,8 @@ def train_model(
             data_loader=val_loader,
             target_scaler=target_scaler,
             model_name=f"Validation {model_name} (Epoch {epoch+1})",
-            log_to_wandb=False  # We'll handle wandb logging separately for training
+            log_to_wandb=False,  # We'll handle wandb logging separately for training
+            debug_mode=debug_mode
         )
 
         # Extract metrics needed for training loop
@@ -192,7 +195,7 @@ def train_model(
     return history
 
 
-def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wandb=True):
+def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wandb=True, debug_mode=False):
     """
     Evaluate a model on a dataset and compute metrics.
 
@@ -202,6 +205,7 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
         target_scaler: Scaler for the target variable
         model_name: Name of the model for logging
         log_to_wandb: Whether to log to wandb
+        debug_mode: Whether to run in debug mode (only run 10 batches)
 
     Returns:
         metrics: Dictionary of evaluation metrics including inference speed
@@ -216,9 +220,14 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
     total_inference_time = 0
     total_samples = 0
 
+    if debug_mode:
+        print("Debug mode is enabled for evaluation. Only running 10 batches.")
+
     with torch.no_grad():
         debug_counter = 0
-        for batch in data_loader:
+        # Add tqdm progress bar
+        eval_loop = tqdm(data_loader, desc=f"Evaluating {model_name}", leave=False)
+        for batch in eval_loop:
             # Check for required fields
             if 'temporal_features' not in batch or 'static_features' not in batch or 'target' not in batch:
                 raise ValueError("Batch missing required fields: 'temporal_features', 'static_features', or 'target'")
@@ -291,8 +300,11 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
             all_targets.append(target.cpu().numpy())
             all_nighttime.append(nighttime.cpu().numpy())
 
+            # Update the progress bar with batch size and inference time
+            eval_loop.set_postfix(samples=batch_size, time_per_batch=f"{batch_inference_time:.4f}s")
+
             debug_counter += 1
-            if debug_counter > 10:
+            if debug_mode and debug_counter > 10:
                 break
 
     # Calculate inference speed metrics

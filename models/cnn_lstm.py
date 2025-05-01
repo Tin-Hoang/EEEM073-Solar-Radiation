@@ -3,7 +3,7 @@ import torch.nn as nn
 
 
 class CNNLSTMModel(nn.Module):
-    def __init__(self, input_dim, static_dim, hidden_dim=128, num_filters=64, kernel_size=3, num_layers=2, dropout=0.3):
+    def __init__(self, input_dim, static_dim, hidden_dim=128, num_filters=64, kernel_size=3, num_layers=2, dropout=0.3, bidirectional=True):
         """
         CNN-LSTM model for time series forecasting
 
@@ -15,8 +15,13 @@ class CNNLSTMModel(nn.Module):
             kernel_size: CNN kernel size
             num_layers: Number of LSTM layers
             dropout: Dropout rate
+            bidirectional: Whether to use bidirectional LSTM
         """
         super(CNNLSTMModel, self).__init__()
+
+        # Save parameters
+        self.bidirectional = bidirectional
+        self.hidden_dim = hidden_dim
 
         # CNN for feature extraction
         self.cnn = nn.Sequential(
@@ -30,16 +35,19 @@ class CNNLSTMModel(nn.Module):
             nn.MaxPool1d(kernel_size=2, stride=2)
         )
 
-
         # LSTM for temporal processing
         self.lstm = nn.LSTM(
             input_size=num_filters*2,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=bidirectional
         )
-        self.bn_lstm = nn.BatchNorm1d(hidden_dim)
+
+        # If bidirectional, the output dimension is doubled
+        lstm_output_dim = hidden_dim * 2 if bidirectional else hidden_dim
+        self.bn_lstm = nn.BatchNorm1d(lstm_output_dim)
 
         # Projection for static features
         self.static_proj = nn.Sequential(
@@ -51,7 +59,7 @@ class CNNLSTMModel(nn.Module):
 
         # Final prediction layers
         self.fc = nn.Sequential(
-            nn.Linear(hidden_dim + 32, 64),
+            nn.Linear(lstm_output_dim + 32, 64),
             nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Dropout(dropout),
