@@ -65,7 +65,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using {device} device")
 
 # ========== Model training hyperparameters =========
-PATIENCE = 10
+PATIENCE = 5  # Early stopping patience
 LR = 0.0001
 # Debug mode to test code. Set to False for actual training
 DEBUG_MODE = True
@@ -406,9 +406,9 @@ transformer_model = TransformerModel(
     input_dim=temporal_dim,           # Dimension of input features
     static_dim=static_dim,            # Dimension of static features
     d_model=128,                      # Transformer model dimension
-    nhead=8,                          # Number of attention heads
-    num_layers=4,                     # Number of transformer layers
-    dim_feedforward=512,              # Dimension of feedforward network
+    nhead=4,                          # Number of attention heads
+    num_layers=2,                     # Number of transformer layers
+    dim_feedforward=256,              # Dimension of feedforward network
     dropout=0.2,                      # Dropout rate
 ).to(device)
 
@@ -451,10 +451,10 @@ informer_model = InformerModel(
     input_dim=temporal_dim,           # Dimension of input features
     static_dim=static_dim,            # Dimension of static features
     d_model=128,                      # Model dimension
-    n_heads=8,                        # Number of attention heads
-    e_layers=3,                       # Number of encoder layers
+    n_heads=4,                        # Number of attention heads
+    e_layers=2,                       # Number of encoder layers
     d_ff=256,                         # Dimension of feedforward network
-    dropout=0.1,                      # Dropout rate
+    dropout=0.2,                      # Dropout rate
     activation='gelu'                 # Activation function
 ).to(device)
 
@@ -530,7 +530,7 @@ fig = compare_models(model_metrics, dataset_name='Test')
 from utils.plot_utils import compare_models_daytime_nighttime
 
 # Generate the comparison plot
-comparison_fig = compare_models_daytime_nighttime(model_metrics, dataset_name='Test Set')
+comparison_fig = compare_models_daytime_nighttime(model_metrics, dataset_name='Test')
 
 
 # %% [markdown]

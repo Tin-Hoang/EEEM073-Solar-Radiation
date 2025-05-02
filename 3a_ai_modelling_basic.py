@@ -66,7 +66,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using {device} device")
 
 # ========== Model training hyperparameters =========
-PATIENCE = 10
+PATIENCE = 5  # Early stopping patience
 LR = 0.0001
 # Debug mode to test code. Set to False for actual training
 DEBUG_MODE = True
@@ -360,7 +360,8 @@ lstm_model = LSTMModel(
     static_dim=static_dim,
     hidden_dim=128,
     num_layers=2,
-    dropout=0.3
+    dropout=0.2,
+    bidirectional=False
 ).to(device)
 
 # Print the model
@@ -400,7 +401,8 @@ cnn_lstm_model = CNNLSTMModel(
     num_filters=64,
     kernel_size=3,
     num_layers=2,
-    dropout=0.3
+    dropout=0.2,
+    bidirectional=False
 ).to(device)
 
 # Print the model
@@ -437,7 +439,7 @@ mlp_model = MLPModel(
     input_dim=temporal_dim,
     static_dim=static_dim,
     hidden_dims=[256, 512, 256, 128],
-    dropout=0.3,
+    dropout=0.2,
     lookback=LOOKBACK
 ).to(device)
 

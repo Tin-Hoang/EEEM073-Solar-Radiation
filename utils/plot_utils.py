@@ -1075,7 +1075,7 @@ def plot_heatmap(ax, df, title):
         # For smaller heatmaps, include colorbar with label
         sns.heatmap(heatmap_df, annot=annot, fmt='', cmap='RdYlGn',
                     cbar_kws={'label': 'Normalized Score (Higher is Better)'},
-                    ax=ax)
+                    linewidths=0.5, ax=ax)
 
     ax.set_title(title)
     ax.set_yticklabels(heatmap_df.index, rotation=0)
@@ -1180,7 +1180,7 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
     plt.suptitle(f'Model Performance Comparison - {dataset_name}', fontsize=18, y=0.98)
 
     # Adjust figure layout
-    fig.subplots_adjust(top=0.95, bottom=0.05)
+    fig.subplots_adjust(top=0.90, bottom=0.05)
 
     # Save the figure
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
