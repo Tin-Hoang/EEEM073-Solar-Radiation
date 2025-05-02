@@ -671,7 +671,6 @@ def compare_models(model_metrics_dict, dataset_name=""):
         dataset_name: Name of the dataset (train/val/test)
 
     Returns:
-        comparison: DataFrame with comparison metrics
         fig: Matplotlib figure with comparison plots
     """
     # Make a deep copy of the input dictionary to avoid modifying the original
@@ -722,19 +721,118 @@ def compare_models(model_metrics_dict, dataset_name=""):
     print(f"\nModel Comparison - {dataset_name} Set:")
     print(comparison)
 
-    # Create comparison visualization
-    fig = create_comparison_plots(comparison, model_names, dataset_name)
-    plt.show()
+    # Create a figure with GridSpec layout
+    fig = create_comparison_visualization(comparison, model_names, dataset_name)
 
     # Save the figure
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     os.makedirs('plots', exist_ok=True)
-    plt.savefig(f'plots/model_comparison_{dataset_name}_{timestamp}.png')
+    fig.savefig(f'plots/model_comparison_{dataset_name}_{timestamp}.png')
 
-    return comparison, fig
+    return fig
 
 
-def create_comparison_plots(comparison_df, model_names, dataset_name=""):
+def plot_radar_chart(ax, df, model_names, model_color_map, title):
+    """
+    Create a radar chart for metrics comparison
+
+    Args:
+        ax: Matplotlib axis
+        df: DataFrame with metrics (can be either a dataframe with metrics as columns and models as index,
+                                   or metrics as index and models as columns)
+        model_names: List of model names
+        model_color_map: Dictionary mapping model names to colors
+        title: Chart title
+    """
+    # Metrics to include in radar chart
+    metrics = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']
+
+    # Check dataframe orientation and adjust if needed
+    if list(df.index) == model_names:
+        # DataFrame has models as index, metrics as columns (daytime/nighttime format)
+        df_oriented = df
+    else:
+        # DataFrame has metrics as index, models as columns (regular format)
+        # Extract only the needed metrics and transpose to get models as index
+        available_metrics = [m for m in metrics if m in df.index]
+        df_oriented = df.loc[available_metrics].transpose()
+
+    # Create a normalized version of the dataframe for radar chart
+    normalized_df = pd.DataFrame(index=model_names, columns=metrics)
+
+    # Define parameters for enhanced normalization
+    SENSITIVITY_FACTOR = 2.0  # Controls how much differences are amplified
+    MIN_RADIUS = 0.4  # Minimum radius for worst values (0.0-1.0)
+
+    # Process each metric individually using enhanced normalization
+    for metric in metrics:
+        if metric in df_oriented.columns:
+            values = df_oriented[metric]
+
+            if metric == 'R²':
+                # For metrics where higher is better
+                min_val = values.min()
+                max_val = values.max()
+
+                if max_val > min_val:
+                    # Calculate base normalization (0-1 scale)
+                    base_norm = (values - min_val) / (max_val - min_val)
+                    # Apply power transformation to amplify differences
+                    normalized_values = MIN_RADIUS + (1 - MIN_RADIUS) * (base_norm ** (1/SENSITIVITY_FACTOR))
+                else:
+                    normalized_values = pd.Series(0.5, index=values.index)
+            else:
+                # For metrics where lower is better (MSE, RMSE, MAE)
+                min_val = values.min()
+                max_val = values.max()
+
+                if max_val > min_val:
+                    # Invert the normalization (so lower values get higher scores)
+                    base_norm = 1 - (values - min_val) / (max_val - min_val)
+                    # Apply power transformation
+                    normalized_values = MIN_RADIUS + (1 - MIN_RADIUS) * (base_norm ** (1/SENSITIVITY_FACTOR))
+                else:
+                    normalized_values = pd.Series(0.5, index=values.index)
+
+            normalized_df[metric] = normalized_values
+
+    # Number of metrics on the radar chart
+    N = len(metrics)
+
+    # Compute the angles for the radar chart
+    angles = [n / float(N) * 2 * np.pi for n in range(N)]
+    angles += angles[:1]  # Close the polygon
+
+    # Add metrics labels (with the first one repeated to close the polygon)
+    metrics_labels = metrics + [metrics[0]]
+
+    # Set up the radar chart
+    ax.set_theta_offset(np.pi / 2)  # Start from top
+    ax.set_theta_direction(-1)  # Clockwise
+
+    # Plot each model
+    for model in model_names:
+        # Get the normalized values for this model
+        values = normalized_df.loc[model].values.flatten().tolist()
+        values += values[:1]  # Close the polygon
+
+        # Plot the radar chart for this model
+        ax.plot(angles, values, '-', linewidth=2, label=model, color=model_color_map[model])
+        ax.fill(angles, values, alpha=0.1, color=model_color_map[model])
+
+    # Set radar chart labels
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(metrics_labels[:-1])
+    ax.set_title(title, size=12)
+
+    # Add legend if not already present elsewhere
+    if not hasattr(ax, 'legend_added'):
+        legend = ax.legend(loc='upper center', bbox_to_anchor=(0.5, 0.98),
+                           ncol=min(len(model_names), 5), fontsize=10)
+        ax.legend_added = True
+
+
+def create_comparison_visualization(comparison_df, model_names, dataset_name=""):
     """
     Create comprehensive comparison visualizations for multiple models
 
@@ -746,38 +844,65 @@ def create_comparison_plots(comparison_df, model_names, dataset_name=""):
     Returns:
         fig: Matplotlib figure
     """
-    # Debug: Print the input DataFrame to verify data
-    print("Input DataFrame for visualization:")
-    print(comparison_df)
-    print("Model names:", model_names)
-
     # Check if inference metrics are present
     has_inference_metrics = False
     if 'Samples/sec' in comparison_df.index and 'ms/sample' in comparison_df.index:
         has_inference_metrics = True
-        rows = 3 if has_inference_metrics else 2
-        cols = 2
-    else:
-        rows = 2
-        cols = 2
+    rows = 2
+    cols = 2
 
     # Create a figure with appropriate layout
     fig = plt.figure(figsize=(18, 7 * rows))
-
-    # Get metrics from the DataFrame
-    error_metrics = ['MSE', 'RMSE', 'MAE', 'WAPE']
-    r2_metric = ['R²']
-    performance_metrics = error_metrics + r2_metric  # Combined metrics
-    speed_metrics = ['Samples/sec', 'ms/sample'] if has_inference_metrics else []
+    gs = GridSpec(rows, cols, figure=fig, height_ratios=[1] * rows, width_ratios=[1, 1],
+                 hspace=0.3, wspace=0.3)
 
     # Define consistent colors for each model
     model_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
-
     # Create a color map for models
     model_color_map = {model: model_colors[i % len(model_colors)] for i, model in enumerate(model_names)}
 
-    # 1. Combined chart for all performance metrics (MSE, RMSE, MAE, WAPE, R²) - grouped by metrics
-    ax_metrics = plt.subplot(rows, cols, 1)
+    # 1. Create performance metrics bar chart
+    ax_metrics = fig.add_subplot(gs[0, 0])
+    plot_performance_metrics_bar(ax_metrics, comparison_df, model_names, model_color_map)
+
+    # 2. Create inference speed chart
+    if has_inference_metrics:
+        ax_speed = fig.add_subplot(gs[0, 1])
+        plot_inference_speed_bar(ax_speed, comparison_df, model_names, model_color_map)
+
+    # 3. Create radar chart
+    ax_radar = fig.add_subplot(gs[1, 0], polar=True)
+    plot_radar_chart(ax_radar, comparison_df, model_names, model_color_map, title='Performance Metrics Comparison')
+
+    # 4. Create heatmap
+    ax_heatmap = fig.add_subplot(gs[1, 1])
+    plot_heatmap(ax_heatmap, comparison_df, title='Performance Metrics Heatmap')
+
+    # Set overall title
+    plt.suptitle(f'Model Comparison - {dataset_name} Dataset', fontsize=16, y=0.96)
+
+    # Add legend below the title
+    handles = [plt.Rectangle((0,0),1,1, color=model_color_map[model]) for model in model_names]
+    fig.legend(handles, model_names, loc='upper center', ncol=min(6, len(model_names)),
+               bbox_to_anchor=(0.5, 0.95), fontsize=12)
+
+    # Adjust layout to make room for the legend below the title
+    fig.subplots_adjust(top=0.90, bottom=0.10)
+
+    return fig
+
+
+def plot_performance_metrics_bar(ax, comparison_df, model_names, model_color_map):
+    """
+    Create a grouped bar chart for performance metrics comparison
+
+    Args:
+        ax: Matplotlib axis
+        comparison_df: DataFrame with metrics
+        model_names: List of model names
+        model_color_map: Dictionary mapping model names to colors
+    """
+    performance_metrics = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']
 
     # Create a copy of the metrics data
     scaled_metrics_df = comparison_df.loc[performance_metrics].copy()
@@ -797,12 +922,11 @@ def create_comparison_plots(comparison_df, model_names, dataset_name=""):
 
     # Calculate scaling factor to make R² values comparable to MAE
     scaling_factor_r2 = 100
-    print(f"Scaling factor for R²: {scaling_factor_r2}")
 
     # Scale up R² values
     scaled_metrics_df.loc['R²'] = r2_values * scaling_factor_r2
 
-    # Set up the bar chart - now grouped by metrics
+    # Set up the bar chart - grouped by metrics
     x = np.arange(len(performance_metrics))  # x positions for the metrics
     width = 0.8 / len(model_names)  # width of each bar, adjusted for number of models
 
@@ -812,170 +936,109 @@ def create_comparison_plots(comparison_df, model_names, dataset_name=""):
         # Position bars for each model within each metric group
         pos = x - 0.4 + (i + 0.5) * width
         values = [scaled_metrics_df.loc[metric, model] for metric in performance_metrics]
-        rects = ax_metrics.bar(pos, values, width, color=model_color_map[model], label=model)
+        rects = ax.bar(pos, values, width, color=model_color_map[model], label=model)
         rects_list.append((rects, model))
 
     # Add labels, title, and custom x-axis tick labels
-    ax_metrics.set_xlabel('Performance Metrics')
-    ax_metrics.set_ylabel('Value')
-    ax_metrics.set_title('Performance Metrics Comparison')
-    ax_metrics.set_xticks(x)
-    ax_metrics.set_xticklabels([
+    ax.set_xlabel('Performance Metrics')
+    ax.set_ylabel('Value')
+    ax.set_title('Performance Metrics Comparison')
+    ax.set_xticks(x)
+    ax.set_xticklabels([
         f'MSE{f" (÷{scaling_factor_mse:.0f})" if scaling_factor_mse > 1 else ""}',
         'RMSE',
         'MAE',
         'WAPE',
         f'R²{f" (×{scaling_factor_r2:.0f})" if scaling_factor_r2 != 1 else ""}'
     ])
-    ax_metrics.grid(axis='y', linestyle='--', alpha=0.7)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
 
     # Add data labels on bars
     for rects, model in rects_list:
         for i, rect in enumerate(rects):
             height = rect.get_height()
             metric = performance_metrics[i]
-            actual_value = comparison_df.loc[metric, model]
+            orig_val = comparison_df.loc[metric, model]
 
             # Format label based on metric type
             if metric == 'MSE':
-                label_text = f'{actual_value:.0f}'
+                label_text = f'{orig_val:.1f}'
             elif metric == 'R²':
-                label_text = f'{actual_value:.4f}'
+                label_text = f'{orig_val:.4f}'
             else:
-                label_text = f'{actual_value:.2f}'
+                label_text = f'{orig_val:.1f}'
 
-            ax_metrics.text(rect.get_x() + rect.get_width()/2., height + 0.05*scaled_metrics_df.loc[metric].max(),
-                         label_text, ha='center', va='bottom', fontsize=8, rotation=0)
+            ax.text(rect.get_x() + rect.get_width()/2., height + 0.05*scaled_metrics_df.loc[metric].max(),
+                     label_text, ha='center', va='bottom', fontsize=8, rotation=0)
 
-    # 2. Inference speed chart in top right (if speed metrics are available)
-    if has_inference_metrics:
-        # Create a single chart for inference speed (Samples/sec only)
-        ax_speed = plt.subplot(rows, cols, 2)
 
-        # Check if Samples/sec metric is available
-        if 'Samples/sec' in comparison_df.index:
-            # Get values
-            values = comparison_df.loc['Samples/sec']
+def plot_inference_speed_bar(ax, comparison_df, model_names, model_color_map):
+    """
+    Create a bar chart for inference speed comparison
 
-            # Create bar chart with consistent model colors
-            bars = ax_speed.bar(range(len(model_names)), values,
-                              color=[model_color_map[model] for model in model_names])
+    Args:
+        ax: Matplotlib axis
+        comparison_df: DataFrame with metrics
+        model_names: List of model names
+        model_color_map: Dictionary mapping model names to colors
+    """
+    # Check if Samples/sec metric is available
+    if 'Samples/sec' in comparison_df.index:
+        # Get values
+        values = comparison_df.loc['Samples/sec']
 
-            # Add data labels on bars
-            for i, bar in enumerate(bars):
-                height = bar.get_height()
-                ax_speed.text(bar.get_x() + bar.get_width()/2., height + 0.01 * max(values),
-                            f'{height:.1f}', ha='center', va='bottom', fontsize=9)
+        # Create bar chart with consistent model colors
+        bars = ax.bar(range(len(model_names)), values,
+                      color=[model_color_map[model] for model in model_names])
 
-            # Set labels and title
-            ax_speed.set_title('Inference Speed Comparison')
-            ax_speed.set_ylabel('Samples/sec')
-            ax_speed.set_xlabel('Model')
-            ax_speed.set_xticks(range(len(model_names)))
-            ax_speed.set_xticklabels(model_names, rotation=30, ha='right')
-            ax_speed.grid(axis='y', linestyle='--', alpha=0.7)
+        # Add data labels on bars
+        for i, bar in enumerate(bars):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.01 * max(values),
+                    f'{height:.1f}', ha='center', va='bottom', fontsize=9)
 
-    # 3. Radar/Spider chart with improved normalization - Performance metrics
-    ax_radar = plt.subplot(rows, cols, 3, polar=True)
+        # Set labels and title
+        ax.set_title('Inference Throughput Comparison')
+        ax.set_ylabel('Samples/sec')
+        ax.set_xlabel('Model')
+        ax.set_xticks(range(len(model_names)))
+        ax.set_xticklabels(model_names, rotation=30, ha='right')
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
 
-    # Prepare data for performance radar chart (excluding inference metrics)
-    perf_metrics = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']
 
-    # Create radar dataframe for performance metrics
-    perf_radar_dict = {}
-    for model in model_names:
-        # Initialize with safe default values
-        model_values = {metric: 0 for metric in perf_metrics}
-        # Fill in values from the original dataframe
-        for metric in perf_metrics:
-            if metric in comparison_df.index and model in comparison_df.columns:
-                model_values[metric] = comparison_df.loc[metric, model]
-        perf_radar_dict[model] = model_values
+def plot_heatmap(ax, df, title):
+    """
+    Create a heatmap for metrics comparison
 
-    # Convert to DataFrame with models as columns, metrics as rows
-    perf_radar_df = pd.DataFrame({model: pd.Series(perf_radar_dict[model]) for model in model_names})
+    Args:
+        ax: Matplotlib axis
+        df: DataFrame with metrics (can be either metrics as rows and models as columns,
+                                   or models as rows and metrics as columns)
+        title: Chart title
+    """
+    # Check dataframe orientation
+    metrics_list = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²', 'Samples/sec', 'ms/sample']
 
-    # Create enhanced normalization approach for better visualization
-    normalized_perf_radar = pd.DataFrame(index=perf_metrics, columns=model_names)
+    # Determine if we need to transpose the dataframe
+    # If the index contains mostly metric names, keep as is
+    # If the columns contain mostly metric names, transpose
+    metrics_in_index = sum(1 for m in metrics_list if m in df.index)
+    metrics_in_columns = sum(1 for m in metrics_list if m in df.columns)
 
-    # Define parameters for enhanced normalization
-    SENSITIVITY_FACTOR = 2.0  # Controls how much differences are amplified (higher = more amplification)
-    MIN_RADIUS = 0.2  # Minimum radius for worst values (0.0-1.0)
+    if metrics_in_columns > metrics_in_index:
+        # Transpose so metrics are in rows, models in columns
+        df_oriented = df.transpose()
+    else:
+        # Already in the right format (metrics in rows, models in columns)
+        df_oriented = df
 
-    # Process each metric individually using enhanced normalization
-    for metric in perf_metrics:
-        values = perf_radar_df.loc[metric]
-
-        if metric == 'R²':
-            # For metrics where higher is better
-            min_val = values.min()
-            max_val = values.max()
-
-            if max_val > min_val:
-                # Calculate base normalization (0-1 scale)
-                base_norm = (values - min_val) / (max_val - min_val)
-
-                # Apply power transformation to amplify differences
-                normalized_values = MIN_RADIUS + (1 - MIN_RADIUS) * (base_norm ** (1/SENSITIVITY_FACTOR))
-            else:
-                normalized_values = pd.Series(0.5, index=values.index)
-        else:
-            # For metrics where lower is better (MSE, RMSE, MAE)
-            min_val = values.min()
-            max_val = values.max()
-
-            if max_val > min_val:
-                # Invert the normalization (so lower values get higher scores)
-                base_norm = 1 - (values - min_val) / (max_val - min_val)
-
-                # Apply power transformation
-                normalized_values = MIN_RADIUS + (1 - MIN_RADIUS) * (base_norm ** (1/SENSITIVITY_FACTOR))
-            else:
-                normalized_values = pd.Series(0.5, index=values.index)
-
-        normalized_perf_radar.loc[metric] = normalized_values
-
-    # Number of metrics on the radar chart
-    N = len(perf_metrics)
-
-    # Compute the angles for the radar chart
-    perf_angles = [n / float(N) * 2 * np.pi for n in range(N)]
-    perf_angles += perf_angles[:1]  # Close the polygon
-
-    # Add metrics labels (with the first one repeated to close the polygon)
-    perf_metrics_labels = perf_metrics + [perf_metrics[0]]
-
-    # Set up the radar chart
-    ax_radar.set_theta_offset(np.pi / 2)  # Start from top
-    ax_radar.set_theta_direction(-1)  # Clockwise
-
-    # Plot each model
-    for i, model in enumerate(model_names):
-        # Get the normalized values for this model
-        values = normalized_perf_radar[model].values.flatten().tolist()
-        values += values[:1]  # Close the polygon
-
-        # Plot the radar chart for this model
-        ax_radar.plot(perf_angles, values, '-', linewidth=2, label=model, color=model_color_map[model])
-        ax_radar.fill(perf_angles, values, alpha=0.1, color=model_color_map[model])
-
-    # Set radar chart labels
-    ax_radar.set_xticks(perf_angles[:-1])
-    ax_radar.set_xticklabels(perf_metrics_labels[:-1])
-    ax_radar.set_title('Performance Metrics Comparison', size=12)
-
-    # 4. Heatmap for the normalized performance metrics including inference speed
-    ax_heatmap = plt.subplot(rows, cols, 4)
-
-    # Create a DataFrame for the heatmap with normalized metrics
-    # Use all metrics: error metrics, R², and inference metrics
-    metrics_for_heatmap = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²', 'Samples/sec', 'ms/sample']
-    metrics_avail = [m for m in metrics_for_heatmap if m in comparison_df.index]
-    heatmap_df = pd.DataFrame(index=metrics_avail, columns=model_names, dtype=float)
+    # Create a normalized version for the heatmap
+    available_metrics = [m for m in df_oriented.index if m in metrics_list]
+    heatmap_df = pd.DataFrame(index=available_metrics, columns=df_oriented.columns, dtype=float)
 
     # Normalize values between 0-1 for the heatmap (1 is always better)
-    for metric in metrics_avail:
-        values = comparison_df.loc[metric].astype(float)  # Ensure numeric values
+    for metric in available_metrics:
+        values = df_oriented.loc[metric].astype(float)  # Ensure numeric values
         min_val = values.min()
         max_val = values.max()
 
@@ -991,33 +1054,31 @@ def create_comparison_plots(comparison_df, model_names, dataset_name=""):
     annot = np.empty_like(heatmap_df.values, dtype='object')
     for i, metric in enumerate(heatmap_df.index):
         for j, model in enumerate(heatmap_df.columns):
-            orig_val = comparison_df.loc[metric, model]
+            orig_val = df_oriented.loc[metric, model]
             if metric == 'R²':
                 annot[i, j] = f"{orig_val:.4f}"
-            elif metric == 'Samples/sec' or metric == 'ms/sample':
-                annot[i, j] = f"{orig_val:.2f}"
+            elif metric == 'ms/sample':
+                # Use more decimal places for very small values
+                if orig_val < 0.01:
+                    annot[i, j] = f"{orig_val:.5f}"
+                else:
+                    annot[i, j] = f"{orig_val:.2f}"
             else:
                 annot[i, j] = f"{orig_val:.2f}"
 
-    # Create heatmap
-    sns.heatmap(heatmap_df, annot=annot, fmt='', cmap='RdYlGn',
-                cbar_kws={'label': 'Normalized Score (Higher is Better)'},
-                ax=ax_heatmap)
+    # Create heatmap with appropriate parameters based on dataframe size
+    if len(heatmap_df.columns) > 10 or len(heatmap_df.index) > 10:
+        # For larger heatmaps, disable colorbar to save space
+        sns.heatmap(heatmap_df, annot=annot, fmt='', cmap='RdYlGn',
+                    linewidths=0.5, cbar=False, ax=ax)
+    else:
+        # For smaller heatmaps, include colorbar with label
+        sns.heatmap(heatmap_df, annot=annot, fmt='', cmap='RdYlGn',
+                    cbar_kws={'label': 'Normalized Score (Higher is Better)'},
+                    ax=ax)
 
-    ax_heatmap.set_title('Performance Metrics Heatmap')
-    ax_heatmap.set_yticklabels(heatmap_df.index, rotation=0)
-
-    # Add legend if not already present elsewhere
-    if not hasattr(fig, 'legend_added'):
-        legend = fig.legend(loc='upper center', bbox_to_anchor=(0.5, 0.98),
-                           ncol=min(len(model_names), 5), fontsize=10)
-        fig.legend_added = True
-
-    # Set overall title
-    plt.suptitle(f'Model Comparison - {dataset_name} Dataset', fontsize=16, y=0.99)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    return fig
+    ax.set_title(title)
+    ax.set_yticklabels(heatmap_df.index, rotation=0)
 
 
 def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
@@ -1092,7 +1153,6 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
 
     # Define consistent colors for each model
     model_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
-
     # Create a color map for models
     model_color_map = {model: model_colors[i % len(model_colors)] for i, model in enumerate(model_names)}
 
@@ -1116,16 +1176,11 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
     ax6 = fig.add_subplot(gs[1, 2])
     plot_heatmap(ax6, nighttime_df.transpose(), "Nighttime Metrics Heatmap")
 
-    # Add a color legend for models at the top of the figure
-    handles = [plt.Rectangle((0,0),1,1, color=model_color_map[model]) for model in model_names]
-    fig.legend(handles, model_names, loc='upper center', ncol=min(6, len(model_names)),
-               bbox_to_anchor=(0.5, 0.98), fontsize=12)
-
     # Set overall title with more space
-    plt.suptitle(f'Model Performance Comparison - {dataset_name}', fontsize=18, y=0.99)
+    plt.suptitle(f'Model Performance Comparison - {dataset_name}', fontsize=18, y=0.98)
 
     # Adjust figure layout
-    fig.subplots_adjust(top=0.90)
+    fig.subplots_adjust(top=0.95, bottom=0.05)
 
     # Save the figure
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1133,117 +1188,6 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
     plt.savefig(f'plots/model_comparison_daytime_nighttime_{dataset_name}_{timestamp}.png')
 
     return fig
-
-
-def plot_radar_chart(ax, df, model_names, model_color_map, title):
-    """Helper function to plot a radar chart for comparing models"""
-    # Metrics to include in radar chart
-    metrics = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']
-
-    # Create a normalized version of the dataframe for radar chart
-    normalized_df = pd.DataFrame(index=df.index, columns=metrics)
-
-    for metric in metrics:
-        values = df[metric]
-
-        if metric == 'R²':
-            # For R² (higher is better)
-            min_val = values.min()
-            max_val = values.max()
-
-            if max_val > min_val:
-                # Normalize R² values (higher is better)
-                normalized_df[metric] = 0.2 + 0.8 * (values - min_val) / (max_val - min_val)
-            else:
-                normalized_df[metric] = 0.5
-        else:
-            # For error metrics (lower is better)
-            min_val = values.min()
-            max_val = values.max()
-
-            if max_val > min_val:
-                # Invert normalization for error metrics (lower is better)
-                normalized_df[metric] = 0.2 + 0.8 * (1 - (values - min_val) / (max_val - min_val))
-            else:
-                normalized_df[metric] = 0.5
-
-    # Number of metrics
-    N = len(metrics)
-
-    # Compute the angles for the radar chart
-    angles = [n / float(N) * 2 * np.pi for n in range(N)]
-    angles += angles[:1]  # Close the polygon
-
-    # Add metrics labels (with the first one repeated to close the polygon)
-    metrics_labels = metrics + [metrics[0]]
-
-    # Set up the radar chart
-    ax.set_theta_offset(np.pi / 2)  # Start from top
-    ax.set_theta_direction(-1)  # Clockwise
-
-    # Plot each model
-    for i, model in enumerate(model_names):
-        # Get the normalized values for this model
-        values = normalized_df.loc[model].values.flatten().tolist()
-        values += values[:1]  # Close the polygon
-
-        # Plot the radar chart for this model
-        ax.plot(angles, values, '-', linewidth=2, label=model, color=model_color_map[model])
-        ax.fill(angles, values, alpha=0.1, color=model_color_map[model])
-
-    # Set radar chart labels
-    ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(metrics_labels[:-1])
-    ax.set_title(title)
-
-    # Add legend if not already present elsewhere
-    if not hasattr(ax, 'legend_added'):
-        legend = ax.legend(loc='upper center', bbox_to_anchor=(0.5, 0.98),
-                           ncol=min(len(model_names), 5), fontsize=10)
-        ax.legend_added = True
-
-def plot_heatmap(ax, df, title):
-    """Helper function to plot a heatmap of metrics"""
-    # Store original values for annotations
-    orig_data = df.values.copy()
-
-    # Create a normalized version for colors
-    norm_df = df.copy()
-
-    # Normalize each metric for color mapping
-    for i, metric in enumerate(df.index):
-        row = norm_df.loc[metric]
-
-        if metric == 'R²':
-            # For R², higher is better
-            min_val = row.min()
-            max_val = row.max()
-            if max_val > min_val:
-                norm_df.loc[metric] = (row - min_val) / (max_val - min_val)
-        else:
-            # For error metrics, lower is better
-            min_val = row.min()
-            max_val = row.max()
-            if max_val > min_val:
-                # Invert so lower error = better color (higher value)
-                norm_df.loc[metric] = 1 - ((row - min_val) / (max_val - min_val))
-            else:
-                norm_df.loc[metric] = 1
-
-    # Format annotations
-    annot = np.empty_like(orig_data, dtype='object')
-    for i in range(orig_data.shape[0]):
-        for j in range(orig_data.shape[1]):
-            if df.index[i] == 'R²':
-                annot[i, j] = f"{orig_data[i, j]:.4f}"
-            else:
-                annot[i, j] = f"{orig_data[i, j]:.2f}"
-
-    # Create heatmap
-    sns.heatmap(norm_df, annot=annot, fmt='', cmap='RdYlGn', ax=ax,
-                linewidths=0.5, cbar=False)
-
-    ax.set_title(title)
 
 
 def plot_predictions_over_time(models, model_names, data_loader, target_scaler, num_samples=200, start_idx=0):
@@ -1258,14 +1202,6 @@ def plot_predictions_over_time(models, model_names, data_loader, target_scaler, 
         num_samples: Number of consecutive time steps to plot
         start_idx: Starting index in the dataset
     """
-    import torch
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import os
-    from matplotlib.patches import Patch
-    import matplotlib.dates as mdates
-    from datetime import datetime
-
     # Get device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

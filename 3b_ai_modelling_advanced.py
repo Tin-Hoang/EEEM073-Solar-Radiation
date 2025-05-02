@@ -1,8 +1,33 @@
 # %% [markdown]
-# # 1. Data Loading
+# # Advanced Solar Radiation Forecasting Models
+#
+# This notebook implements state-of-the-art deep learning architectures for Global Horizontal Irradiance (GHI) forecasting using time series weather data. Building on the basic models in `3a_ai_modelling_basic.py`, this notebook explores more sophisticated architectures:
+#
+# 1. **TCN (Temporal Convolutional Network)** - Specialized convolutional architecture with dilated convolutions for sequence modeling
+# 2. **Transformer** - Attention-based architecture, adapted for time series forecasting
+# 3. **Informer** - Advanced Transformer variant optimized for long sequence time-series forecasting
+#
+# ## Prerequisites
+#
+# **IMPORTANT**: Before running this notebook, you must first run the `2_data_preprocessing.py` script to prepare the normalized data. This script generates the train, validation, and test datasets needed for model training and evaluation.
+#
+# ## Workflow Overview
+#
+# 1. **Data Loading** - Load preprocessed time series datasets
+# 2. **Model Training Setup** - Configure training parameters and utilities
+# 3. **Advanced Model Training** - Train cutting-edge deep learning architectures
+# 4. **Performance Evaluation** - Compare state-of-the-art models using various metrics
+# 5. **Visualization** - Plot time series predictions and model comparisons
 
 # %% [markdown]
-# ### 1.1 Create PyTorch Datasets and DataLoaders
+# # 1. Data Loading
+#
+# In this section, we load and prepare the preprocessed time series data for training our advanced models. The data includes various weather features like temperature, wind speed, solar angles, etc., used to predict the Global Horizontal Irradiance (GHI).
+
+# %% [markdown]
+# ### 1.1 Import modules and define hyperparameters
+#
+# Here, we define hyperparameters for model training, including the lookback window, batch size, and selected features.
 
 # %%
 # Load autoreload extension
@@ -13,18 +38,21 @@
 # Import required libraries
 import os
 import numpy as np
+from datetime import datetime
+import json
 
 import torch
 from torch.utils.data import DataLoader
 import wandb
-from datetime import datetime # Import datetime for timestamp
-
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+import matplotlib.dates as mdates
 # Local modules
 from utils.data_persistence import load_scalers
 from utils.plot_utils import plot_training_history, plot_evaluation_metrics
 from utils.training_utils import train_model, evaluate_model
 from utils.wandb_utils import is_wandb_enabled, set_wandb_flag, set_keep_run_open
-from utils.model_utils import print_model_info, save_model, load_model
+from utils.model_utils import print_model_info, save_model
 
 # Set random seeds for reproducibility
 np.random.seed(42)
@@ -56,8 +84,8 @@ else:
 
 # ================= Wandb settings =============
 USE_WANDB = False
-WANDB_USERNAME = "tin-hoang"
-WANDB_PROJECT = "EEEM073-Solar-Radiation"
+WANDB_USERNAME = "tin-hoang"  # Your wandb username
+WANDB_PROJECT = "EEEM073-Solar-Radiation"  # Your wandb project name
 
 # =========== Time series hyperparameters ===========
 # Number of timesteps to look back when creating sequences
@@ -83,8 +111,14 @@ STATIC_FEATURES = ['latitude', 'longitude', 'elevation']
 # Target variable
 TARGET_VARIABLE = 'ghi'
 
+# %% [markdown]
+# ### 1.2 Create PyTorch Datasets and DataLoaders
+#
+# Here, we set up the PyTorch data pipeline by creating custom datasets and DataLoaders.
 
 # %%
+# Loading preprocessed data files generated from 2_data_preprocessing.py
+# These files contain normalized time series data split into train, validation, and test sets
 from utils.data_persistence import load_normalized_data
 
 TRAIN_PREPROCESSED_DATA_PATH = "data/processed/train_normalized_20250430_145157.h5"
@@ -111,6 +145,8 @@ for key, value in train_data.items():
 
 
 # %%
+# Creating PyTorch datasets from preprocessed data
+# TimeSeriesDataset is a custom dataset class that formats the data for model training
 from utils.timeseriesdataset import TimeSeriesDataset
 
 # Create datasets
@@ -131,6 +167,7 @@ test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num
 
 
 # %%
+# Examining data dimensions to configure model architectures
 # Get a batch to determine input dimensions
 batch = next(iter(train_loader))
 
@@ -166,17 +203,15 @@ print(f"  - Static dimension: {static_dim}")
 
 # %% [markdown]
 # ## 2. Model Training Setup
+#
+# This section configures the training environment, including setting up experiment tracking, defining the training pipeline, and preparing evaluation metrics.
 
 # %% [markdown]
-# ## 2.1 Setting parameters
+# ## 2.1 Setting Wandb logging (optional)
+#
+# Weights & Biases (wandb) is used for experiment tracking. Here we configure whether to use wandb for logging model training progress and results.
 
 # %%
-from torchinfo import summary
-
-from utils.training_utils import train_model, evaluate_model
-from utils.wandb_utils import is_wandb_enabled, set_wandb_flag, set_keep_run_open
-from utils.model_utils import print_model_info
-
 # Enable wandb tracking
 set_wandb_flag(USE_WANDB)
 # Keep the wandb run open after training to continue logging evaluation plots
@@ -185,6 +220,12 @@ set_keep_run_open(True)
 
 # %% [markdown]
 # ## 2.2 Setup Experiment Pipeline
+#
+# We define a standardized pipeline for training and evaluating models. This function handles the entire workflow:
+# 1. Model training with early stopping (use train and val set)
+# 2. Evaluation on test data
+# 3. Saving model checkpoints
+# 4. Logging results to wandb (if enabled)
 
 # %%
 def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_name, epochs=30, patience=5, lr=0.001):
@@ -232,7 +273,8 @@ def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_
             model,
             test_loader,
             scalers[f'{TARGET_VARIABLE}_scaler'],
-            model_name=f"{model_name} - Test"
+            model_name=f"{model_name} - Test",
+            debug_mode=DEBUG_MODE,
         )
         test_plot = plot_evaluation_metrics(test_metrics, model_name=f"{model_name} - Test")
 
@@ -295,8 +337,12 @@ def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_
 
     return history, val_metrics, test_metrics
 
+
 # %% [markdown]
-# # 3. Model Experiments
+# # 3. Advanced Model Experiments
+#
+# This section implements and trains state-of-the-art neural network architectures for GHI forecasting.
+# These advanced models can capture more complex temporal patterns compared to basic architectures.
 
 # %% [markdown]
 # ### 3.1 Temporal Convolutional Networks (TCN) Model
@@ -434,9 +480,15 @@ informer_history, informer_val_metrics, informer_test_metrics = run_experiment_p
 
 # %% [markdown]
 # ## 4. Model Comparison
+#
+# After training all models, we compare their performance to determine which advanced architecture works best for GHI forecasting.
 
 # %% [markdown]
-# ## 4.1 Compare Models' Performance
+# ## 4.1 Compare Advanced Models' Performance
+#
+# This section compares the overall performance metrics (MSE, RMSE, MAE, R²) of all trained advanced models
+# on the test dataset. These metrics help us understand which state-of-the-art model provides the most
+# accurate predictions across the entire test set.
 
 # %%
 from utils.plot_utils import compare_models
@@ -447,36 +499,53 @@ model_metrics = {
     'Transformer': transformer_test_metrics,
     'Informer': informer_test_metrics
 }
+# Drop the 'y_pred' and 'y_true' keys from the model metrics
+for model in model_metrics:
+    model_metrics[model].pop('y_pred', None)
+    model_metrics[model].pop('y_true', None)
+    model_metrics[model].pop('nighttime_mask', None)
+
+# Save model metrics to a json file for later use
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+json_file_path = f'plots/advanced_model_metrics_{timestamp}.json'
+# Fix TypeError: Object of type float32 is not JSON serializable
+for model in model_metrics:
+    for key, value in model_metrics[model].items():
+        if isinstance(value, np.float32):
+            model_metrics[model][key] = float(value)
+with open(json_file_path, 'w') as f:
+    json.dump(model_metrics, f)
 
 # Compare model performance on test set
-print("\nTest Set Comparison:")
-compare_models(model_metrics, dataset_name='Test Set')
-
+fig = compare_models(model_metrics, dataset_name='Test')
 
 # %% [markdown]
 # ## 4.2 Model Comparison on Daytime/Nighttime/Overall
+#
+# Here we analyze model performance separately for daytime and nighttime periods. This is crucial for solar forecasting
+# as prediction requirements and patterns differ significantly between day and night. The comparison helps identify
+# which advanced models perform better under different lighting conditions.
 
 # %%
 from utils.plot_utils import compare_models_daytime_nighttime
-
-# Create a dictionary of model metrics
-model_metrics = {
-    'TCN': tcn_test_metrics,
-    'Transformer': transformer_test_metrics,
-    'Informer': informer_test_metrics
-}
 
 # Generate the comparison plot
 comparison_fig = compare_models_daytime_nighttime(model_metrics, dataset_name='Test Set')
 
 
 # %% [markdown]
-# ## 5. Train and Evaluate Models
+# ## 5. Visualization and Analysis
+#
+# This section provides visual analysis of advanced model predictions to better understand model performance.
 
 # %% [markdown]
-# ### 5.2 Time Series Predictions
+# ### 5.1 Time Series Predictions
 #
-# Visualize predictions over time.
+# Visualize predictions over time to compare how each advanced model tracks the actual GHI values. This visualization includes:
+# - Actual GHI values (ground truth)
+# - Predictions from each advanced model architecture
+# - Nighttime periods shaded for context
+# - Error metrics for the visualized time period
 
 # %%
 def plot_predictions_over_time(models, model_names, data_loader, target_scaler, num_samples=200, start_idx=0):
@@ -491,14 +560,6 @@ def plot_predictions_over_time(models, model_names, data_loader, target_scaler, 
         num_samples: Number of consecutive time steps to plot
         start_idx: Starting index in the dataset
     """
-    import torch
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import os
-    from matplotlib.patches import Patch
-    import matplotlib.dates as mdates
-    from datetime import datetime
-
     # Get device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -711,8 +772,8 @@ def plot_predictions_over_time(models, model_names, data_loader, target_scaler, 
 
 
 # %%
-# Plot time series predictions
-plot_predictions_over_time(
+# Plot time series predictions for advanced models
+_ = plot_predictions_over_time(
     models=[tcn_model, transformer_model, informer_model],
     model_names=['TCN', 'Transformer', 'Informer'],
     data_loader=test_loader,
@@ -720,6 +781,3 @@ plot_predictions_over_time(
     num_samples=72,
     start_idx=40
 )
-
-
-
