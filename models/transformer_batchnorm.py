@@ -28,10 +28,8 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:, :x.size(1), :]
 
 
-class TransformerModel(nn.Module):
-    """Transformer model for time series forecasting with static features"""
-    def __init__(self, input_dim, static_dim, d_model=128, n_heads=8, e_layers=3, d_ff=512,
-                 dropout=0.3, activation='gelu'):
+class TransformerBNModel(nn.Module):
+    def __init__(self, input_dim, static_dim, d_model=128, n_heads=8, e_layers=2, d_ff=512, dropout=0.3):
         """
         Transformer model for time series forecasting
 
@@ -44,60 +42,78 @@ class TransformerModel(nn.Module):
             dim_feedforward: Dimension of the feedforward network
             dropout: Dropout rate
         """
-        super(TransformerModel, self).__init__()
+        super(TransformerBNModel, self).__init__()
 
-        # Data projection
-        self.enc_embedding = nn.Linear(input_dim, d_model)
+        # Feature dimension projection to d_model
+        self.input_projection = nn.Linear(input_dim, d_model)
 
         # Positional encoding
         self.pos_encoder = PositionalEncoding(d_model)
 
-        # Transformer encoder layers
+        # Transformer encoder
         encoder_layers = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=n_heads,
             dim_feedforward=d_ff,
             dropout=dropout,
-            activation=activation if activation != 'gelu' else 'gelu',
             batch_first=True
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=e_layers)
 
-        # Static features projection
+        # Batch normalization for transformer output
+        self.bn_transformer = nn.BatchNorm1d(d_model)
+
+        # Projection for static features
         self.static_proj = nn.Sequential(
-            nn.Linear(static_dim, d_model // 2),
-            nn.LayerNorm(d_model // 2),
+            nn.Linear(static_dim, 32),
+            nn.BatchNorm1d(32),
             nn.ReLU(),
             nn.Dropout(dropout)
         )
 
-        # Output projection
-        self.output_layer = nn.Sequential(
-            nn.Linear(d_model + d_model // 2, d_model // 2),
-            nn.LayerNorm(d_model // 2),
+        # Final prediction layers
+        self.fc = nn.Sequential(
+            nn.Linear(d_model + 32, 64),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, 1)
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1)
         )
 
     def forward(self, temporal_features, static_features):
-        # Project input to model dimension and add positional encoding
-        x = self.enc_embedding(temporal_features)
+        """
+        Forward pass of the transformer model
+
+        Args:
+            temporal_features: Temporal features [batch, seq_len, features]
+            static_features: Static features [batch, features]
+
+        Returns:
+            output: Prediction [batch, 1]
+        """
+        # Project input to d_model dimension
+        x = self.input_projection(temporal_features)
+
+        # Add positional encoding
         x = self.pos_encoder(x)
 
-        # Pass through transformer encoder
-        enc_out = self.transformer_encoder(x)
+        # Apply transformer encoder
+        transformer_out = self.transformer_encoder(x)
 
-        # Get the last output for prediction
-        last_hidden = enc_out[:, -1, :]
+        # Extract the last time step
+        transformer_out = transformer_out[:, -1, :]
+        transformer_out = self.bn_transformer(transformer_out)
 
         # Process static features
         static_out = self.static_proj(static_features)
 
-        # Combine temporal and static features
-        combined = torch.cat([last_hidden, static_out], dim=1)
+        # Combine features
+        combined = torch.cat([transformer_out, static_out], dim=1)
 
-        # Output layer
-        output = self.output_layer(combined)
-
-        return output.squeeze()
+        # Final prediction
+        output = self.fc(combined)
+        return output

@@ -84,7 +84,7 @@ else:
     NUM_WORKERS = 16
 
 # ================= Wandb settings =============
-USE_WANDB = False
+USE_WANDB = False if DEBUG_MODE else True
 WANDB_USERNAME = "tin-hoang"  # Your wandb username
 WANDB_PROJECT = "EEEM073-Solar-Radiation"  # Your wandb project name
 

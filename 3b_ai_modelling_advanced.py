@@ -74,7 +74,7 @@ if DEBUG_MODE:
     # Local debug settings (to check if the code is working)
     # Will only run 10 batches/epoch for 10 epochs
     N_EPOCHS = 10
-    BATCH_SIZE = 64
+    BATCH_SIZE = 3000
     NUM_WORKERS = 4
 else:
     # Remote server settings (to train the model, recommend using Otter lab machine)
@@ -83,7 +83,7 @@ else:
     NUM_WORKERS = 16
 
 # ================= Wandb settings =============
-USE_WANDB = False
+USE_WANDB = False if DEBUG_MODE else True
 WANDB_USERNAME = "tin-hoang"  # Your wandb username
 WANDB_PROJECT = "EEEM073-Solar-Radiation"  # Your wandb project name
 
@@ -264,6 +264,7 @@ def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_
             lr=lr,
             target_scaler=scalers[f'{TARGET_VARIABLE}_scaler'],
             config=CONFIG,
+            device=device,
             debug_mode=DEBUG_MODE,
         )
         training_plot = plot_training_history(history, model_name=model_name)
@@ -274,6 +275,7 @@ def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_
             test_loader,
             scalers[f'{TARGET_VARIABLE}_scaler'],
             model_name=f"{model_name} - Test",
+            device=device,
             debug_mode=DEBUG_MODE,
         )
         test_plot = plot_evaluation_metrics(test_metrics, model_name=f"{model_name} - Test")
@@ -362,7 +364,7 @@ from models.tcn import TCNModel
 tcn_model = TCNModel(
     input_dim=temporal_dim,
     static_dim=static_dim,
-    num_channels=[64, 128, 128, 64],  # Number of channels in each layer
+    num_channels=[32, 64, 64, 32],  # Number of channels in each layer
     kernel_size=3,                    # Size of the convolutional kernel
     dropout=0.2,                      # Dropout rate
 ).to(device)
@@ -387,16 +389,9 @@ tcn_history, tcn_val_metrics, tcn_test_metrics = run_experiment_pipeline(
 )
 
 
-# %% [markdown]
-# ### 3.2 Transformer Model
-#
-# Transformers revolutionized natural language processing and have been adapted for time series forecasting with impressive results. Their key advantages include:
-#
-# - **Self-Attention Mechanism**: Allows the model to weight the importance of different input time steps dynamically.
-# - **Parallelization**: Can process the entire sequence in parallel, unlike RNNs.
-# - **Long-range Dependencies**: Captures dependencies at arbitrary distances in the sequence.
-#
-# For solar forecasting, Transformers can identify complex temporal patterns across different time scales and account for both short-term and long-term relationships in the weather and solar data.
+# ### 3.3 Transformer Model
+# Same as the Transformer model but with LayerNorm instead of BatchNorm
+
 
 # %%
 from models.transformer import TransformerModel
@@ -405,11 +400,12 @@ from models.transformer import TransformerModel
 transformer_model = TransformerModel(
     input_dim=temporal_dim,           # Dimension of input features
     static_dim=static_dim,            # Dimension of static features
-    d_model=128,                      # Transformer model dimension
-    nhead=4,                          # Number of attention heads
-    num_layers=2,                     # Number of transformer layers
-    dim_feedforward=256,              # Dimension of feedforward network
+    d_model=128,                      # Model dimension
+    n_heads=4,                        # Number of attention heads
+    e_layers=1,                       # Number of encoder layers
+    d_ff=256,                         # Dimension of feedforward network
     dropout=0.2,                      # Dropout rate
+    activation='gelu'                 # Activation function
 ).to(device)
 
 # Print the model
@@ -431,9 +427,8 @@ transformer_history, transformer_val_metrics, transformer_test_metrics = run_exp
     lr=LR
 )
 
-
 # %% [markdown]
-# ### 3.3 Informer Model
+# ### 3.4 Informer Model
 #
 # The Informer model is a recent advancement in time series forecasting that addresses the limitations of standard Transformer models for long sequence prediction. Key innovations include:
 #
@@ -448,14 +443,18 @@ from models.informer import InformerModel
 
 # Create Informer model
 informer_model = InformerModel(
-    input_dim=temporal_dim,           # Dimension of input features
-    static_dim=static_dim,            # Dimension of static features
-    d_model=128,                      # Model dimension
-    n_heads=4,                        # Number of attention heads
-    e_layers=2,                       # Number of encoder layers
-    d_ff=256,                         # Dimension of feedforward network
-    dropout=0.2,                      # Dropout rate
-    activation='gelu'                 # Activation function
+    input_dim=temporal_dim,
+    static_dim=static_dim,
+    d_model=128,
+    n_heads=4,
+    e_layers=1,
+    d_ff=256,
+    dropout=0.2,
+    # attn='prob',
+    # distil=True,  # Enable distillation for better performance
+    # output_attention=False,
+    # mix=False,
+    # pred_len=1
 ).to(device)
 
 # Print the model
@@ -479,6 +478,98 @@ informer_history, informer_val_metrics, informer_test_metrics = run_experiment_p
 
 
 # %% [markdown]
+# ### 3.5 TSMixer Model
+#
+# TSMixer is a simple yet effective architecture for time series forecasting that applies the ideas of MLP-Mixer to time series data:
+#
+# - **Separate time and feature mixing**: Processes temporal and feature dimensions separately
+# - **Parameter efficiency**: Uses simple MLP blocks to mix information across dimensions
+# - **Fast training**: Simple architecture allows for efficient training
+#
+# For solar radiation forecasting, TSMixer can effectively capture both temporal patterns and feature interactions with a lightweight architecture.
+
+# %%
+from models.tsmixer import TSMixerModel
+
+# Create TSMixer model
+tsmixer_model = TSMixerModel(
+    input_dim=temporal_dim,
+    static_dim=static_dim,
+    lookback=LOOKBACK,
+    horizon=1,             # Single-step prediction
+    ff_dim=256,            # Feed-forward dimension
+    num_blocks=8,          # Number of TSMixer blocks
+    norm_type='batch',
+    activation='relu',
+    dropout=0.2
+).to(device)
+
+# Print the model
+print_model_info(tsmixer_model, temporal_features.shape, static_features.shape)
+
+
+# %%
+model_name = "TSMixer"
+
+# Train the TSMixer model
+tsmixer_history, tsmixer_val_metrics, tsmixer_test_metrics = run_experiment_pipeline(
+    tsmixer_model,
+    train_loader,
+    val_loader,
+    test_loader,
+    model_name=model_name,
+    epochs=N_EPOCHS,
+    patience=PATIENCE,
+    lr=LR
+)
+
+# %% [markdown]
+# ### 3.6 iTransformer Model
+#
+# iTransformer is an innovative approach to time series forecasting that inverts the traditional Transformer architecture:
+#
+# - **Inverted Attention Mechanism**: Applies self-attention across the feature dimension rather than the time dimension
+# - **Feature as Tokens**: Treats each feature as a token (rather than each timestamp)
+# - **Improved Feature Interactions**: Better captures correlations between different variables
+#
+# For solar radiation forecasting, iTransformer can effectively model relationships between different meteorological variables, potentially leading to more accurate predictions.
+
+# %%
+from models.itransformer import iTransformerModel
+
+# Create iTransformer model
+itransformer_model = iTransformerModel(
+    input_dim=temporal_dim,           # Number of input features
+    static_dim=static_dim,            # Number of static features
+    d_model=128,                      # Model dimension
+    n_heads=4,                        # Number of attention heads
+    e_layers=2,                       # Number of encoder layers
+    d_ff=256,                         # Dimension of feedforward network
+    dropout=0.2,                      # Dropout rate
+    lookback=LOOKBACK,                # Historical sequence length
+    pred_len=1                        # Prediction length
+).to(device)
+
+# Print the model
+print_model_info(itransformer_model, temporal_features.shape, static_features.shape)
+
+
+# %%
+model_name = "iTransformer"
+
+# Train the iTransformer model
+itransformer_history, itransformer_val_metrics, itransformer_test_metrics = run_experiment_pipeline(
+    itransformer_model,
+    train_loader,
+    val_loader,
+    test_loader,
+    model_name=model_name,
+    epochs=N_EPOCHS,
+    patience=PATIENCE,
+    lr=LR
+)
+
+# %% [markdown]
 # ## 4. Model Comparison
 #
 # After training all models, we compare their performance to determine which advanced architecture works best for GHI forecasting.
@@ -497,7 +588,9 @@ from utils.plot_utils import compare_models
 model_metrics = {
     'TCN': tcn_test_metrics,
     'Transformer': transformer_test_metrics,
-    'Informer': informer_test_metrics
+    'Informer': informer_test_metrics,
+    'TSMixer': tsmixer_test_metrics,
+    'iTransformer': itransformer_test_metrics
 }
 # Drop the 'y_pred' and 'y_true' keys from the model metrics
 for model in model_metrics:
@@ -774,8 +867,8 @@ def plot_predictions_over_time(models, model_names, data_loader, target_scaler, 
 # %%
 # Plot time series predictions for advanced models
 _ = plot_predictions_over_time(
-    models=[tcn_model, transformer_model, informer_model],
-    model_names=['TCN', 'Transformer', 'Informer'],
+    models=[tcn_model, transformer_model, informer_model, tsmixer_model, itransformer_model],
+    model_names=['TCN', 'Transformer', 'Informer', 'TSMixer', 'iTransformer'],
     data_loader=test_loader,
     target_scaler=scalers[f'{TARGET_VARIABLE}_scaler'],
     num_samples=72,

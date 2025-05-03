@@ -11,7 +11,7 @@ import time
 from utils.wandb_utils import track_experiment, is_wandb_enabled
 
 # Device configuration
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+default_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @track_experiment
@@ -25,7 +25,8 @@ def train_model(
     lr=0.001,
     debug_mode=False,
     target_scaler=None,
-    config=None
+    config=None,
+    device=default_device
 ):
     """
     Train a model and validate it
@@ -46,7 +47,7 @@ def train_model(
         history: Dictionary of training history
         best_model: Model with best validation performance
     """
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     criterion = nn.MSELoss()
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6
@@ -195,7 +196,7 @@ def train_model(
     return history
 
 
-def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wandb=True, debug_mode=False):
+def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wandb=True, device=default_device, debug_mode=False):
     """
     Evaluate a model on a dataset and compute metrics.
 
@@ -205,6 +206,7 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
         target_scaler: Scaler for the target variable
         model_name: Name of the model for logging
         log_to_wandb: Whether to log to wandb
+        device: Device to run the evaluation on
         debug_mode: Whether to run in debug mode (only run 10 batches)
 
     Returns:
