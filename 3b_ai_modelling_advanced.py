@@ -312,6 +312,7 @@ def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_
                     "rmse": test_metrics["rmse"] if test_metrics else None,
                     "mae": test_metrics["mae"] if test_metrics else None,
                     "r2": test_metrics["r2"] if test_metrics else None,
+                    "mase": test_metrics["mase"] if test_metrics else None,
                 }
             },
             temporal_features=all_temporal_features,
@@ -577,7 +578,7 @@ itransformer_history, itransformer_val_metrics, itransformer_test_metrics = run_
 # %% [markdown]
 # ## 4.1 Compare Advanced Models' Performance
 #
-# This section compares the overall performance metrics (MSE, RMSE, MAE, R²) of all trained advanced models
+# This section compares the overall performance metrics (MSE, RMSE, MAE, MASE, R²) of all trained advanced models
 # on the test dataset. These metrics help us understand which state-of-the-art model provides the most
 # accurate predictions across the entire test set.
 

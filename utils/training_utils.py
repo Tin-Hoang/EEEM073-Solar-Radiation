@@ -332,10 +332,23 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
     mae = mean_absolute_error(y_true_orig, y_pred_orig)
     r2 = r2_score(y_true_orig, y_pred_orig)
 
-    # Calculate WAPE (Weighted Absolute Percentage Error)
-    abs_error_sum = np.sum(np.abs(y_true_orig - y_pred_orig))
-    abs_actual_sum = np.sum(np.abs(y_true_orig))
-    wape = (abs_error_sum / abs_actual_sum) * 100 if abs_actual_sum > 0 else float('nan')
+    # Calculate MASE (Mean Absolute Scaled Error) with 24-hour seasonal naive forecast
+    # For seasonal data, the naive forecast is the value from the same time in the previous season (24 hours ago)
+    # MASE = MAE / MAE_naive where MAE_naive is the MAE of the naive forecast
+
+    # For simplicity, we'll use a naive approach to calculate MASE assuming data is ordered
+    # Create a naive forecast that's the value 24 steps ago (one day for hourly data)
+    n_samples = len(y_true_orig)
+    naive_forecast = np.roll(y_true_orig, 24)  # Shift by 24 hours
+
+    # The first 24 values don't have valid naive forecasts, exclude them from calculation
+    if n_samples > 24:
+        # Calculate MAE of the naive forecast (excluding the first 24 samples)
+        mae_naive = mean_absolute_error(y_true_orig[24:], naive_forecast[24:])
+        # Calculate MASE (avoid division by zero)
+        mase = mae / mae_naive if mae_naive > 0 else float('nan')
+    else:
+        mase = float('nan')
 
     # Calculate daytime/nighttime metrics if we have nighttime data
     if has_nighttime_data:
@@ -352,33 +365,53 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
         day_mae = mean_absolute_error(y_true_orig[day_mask], y_pred_orig[day_mask])
         day_r2 = r2_score(y_true_orig[day_mask], y_pred_orig[day_mask])
 
-        # Calculate daytime WAPE
-        day_abs_error_sum = np.sum(np.abs(y_true_orig[day_mask] - y_pred_orig[day_mask]))
-        day_abs_actual_sum = np.sum(np.abs(y_true_orig[day_mask]))
-        day_wape = (day_abs_error_sum / day_abs_actual_sum) * 100 if day_abs_actual_sum > 0 else float('nan')
+        # Calculate daytime MASE
+        day_mask_array = np.where(day_mask)[0]
+        if len(day_mask_array) > 24:
+            # Create a mask for day samples that have valid naive forecasts (24 hours ago was also day)
+            valid_day_indices = day_mask_array[np.isin(day_mask_array - 24, day_mask_array)]
+            if len(valid_day_indices) > 0:
+                # Get actual values and naive forecast for these indices
+                actual_day_values = y_true_orig[valid_day_indices]
+                naive_day_forecast = y_true_orig[valid_day_indices - 24]
+                day_mae_naive = mean_absolute_error(actual_day_values, naive_day_forecast)
+                day_mase = day_mae / day_mae_naive if day_mae_naive > 0 else float('nan')
+            else:
+                day_mase = float('nan')
+        else:
+            day_mase = float('nan')
     else:
-        day_mse = day_rmse = day_mae = day_r2 = day_wape = np.nan
+        day_mse = day_rmse = day_mae = day_r2 = day_mase = float('nan')
 
     if np.sum(night_mask) > 0:
         night_mse = mean_squared_error(y_true_orig[night_mask], y_pred_orig[night_mask])
         night_rmse = np.sqrt(night_mse)
         night_mae = mean_absolute_error(y_true_orig[night_mask], y_pred_orig[night_mask])
-        night_r2 = r2_score(y_true_orig[night_mask], y_pred_orig[night_mask]) if np.unique(y_true_orig[night_mask]).size > 1 else np.nan
-        night_abs_actual_sum = np.sum(np.abs(y_true_orig[night_mask]))
-        if night_abs_actual_sum > 0:
-            print("Warning: Non-zero GHI detected in nighttime data, WAPE may be unreliable")
-            night_abs_error_sum = np.sum(np.abs(y_true_orig[night_mask] - y_pred_orig[night_mask]))
-            night_wape = (night_abs_error_sum / night_abs_actual_sum) * 100
+        night_r2 = r2_score(y_true_orig[night_mask], y_pred_orig[night_mask]) if np.unique(y_true_orig[night_mask]).size > 1 else float('nan')
+
+        # Calculate nighttime MASE
+        night_mask_array = np.where(night_mask)[0]
+        if len(night_mask_array) > 24:
+            # Create a mask for night samples that have valid naive forecasts (24 hours ago was also night)
+            valid_night_indices = night_mask_array[np.isin(night_mask_array - 24, night_mask_array)]
+            if len(valid_night_indices) > 0:
+                # Get actual values and naive forecast for these indices
+                actual_night_values = y_true_orig[valid_night_indices]
+                naive_night_forecast = y_true_orig[valid_night_indices - 24]
+                night_mae_naive = mean_absolute_error(actual_night_values, naive_night_forecast)
+                night_mase = night_mae / night_mae_naive if night_mae_naive > 0 else float('nan')
+            else:
+                night_mase = float('nan')
         else:
-            night_wape = np.nan
+            night_mase = float('nan')
     else:
-        night_mse = night_rmse = night_mae = night_r2 = night_wape = np.nan
+        night_mse = night_rmse = night_mae = night_r2 = night_mase = float('nan')
 
     # Create evaluation metrics dictionary
     metrics = {
-        'mse': mse, 'rmse': rmse, 'mae': mae, 'r2': r2, 'wape': wape,
-        'day_mse': day_mse, 'day_rmse': day_rmse, 'day_mae': day_mae, 'day_r2': day_r2, 'day_wape': day_wape,
-        'night_mse': night_mse, 'night_rmse': night_rmse, 'night_mae': night_mae, 'night_r2': night_r2, 'night_wape': night_wape,
+        'mse': mse, 'rmse': rmse, 'mae': mae, 'r2': r2, 'mase': mase,
+        'day_mse': day_mse, 'day_rmse': day_rmse, 'day_mae': day_mae, 'day_r2': day_r2, 'day_mase': day_mase,
+        'night_mse': night_mse, 'night_rmse': night_rmse, 'night_mae': night_mae, 'night_r2': night_r2, 'night_mase': night_mase,
         'y_pred': y_pred_orig, 'y_true': y_true_orig, 'nighttime_mask': all_nighttime,
         'total_inference_time': total_inference_time,
         'total_samples': total_samples,
@@ -388,14 +421,14 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
 
     # Print metrics
     print(f"\n{model_name} Evaluation Metrics:")
-    print(f"  Overall:  MSE: {mse:.2f}, RMSE: {rmse:.2f}, MAE: {mae:.2f}, R²: {r2:.4f}, WAPE: {wape:.2f}%")
-    print(f"  Daytime:  MSE: {day_mse:.2f}, RMSE: {day_rmse:.2f}, MAE: {day_mae:.2f}, R²: {day_r2:.4f}, WAPE: {day_wape:.2f}%")
+    print(f"  Overall:  MSE: {mse:.2f}, RMSE: {rmse:.2f}, MAE: {mae:.2f}, R²: {r2:.4f}, MASE: {mase:.2f}")
+    print(f"  Daytime:  MSE: {day_mse:.2f}, RMSE: {day_rmse:.2f}, MAE: {day_mae:.2f}, R²: {day_r2:.4f}, MASE: {day_mase:.2f}")
 
     if has_nighttime_data:
         # Fix the f-string formatting - move conditional outside format specifier
         r2_str = f"{night_r2:.4f}" if not np.isnan(night_r2) else "N/A"
-        wape_str = f"{night_wape:.2f}%" if not np.isnan(night_wape) else "N/A"
-        print(f"  Nighttime: MSE: {night_mse:.2f}, RMSE: {night_rmse:.2f}, MAE: {night_mae:.2f}, R²: {r2_str}, WAPE: {wape_str}")
+        mase_str = f"{night_mase:.2f}" if not np.isnan(night_mase) else "N/A"
+        print(f"  Nighttime: MSE: {night_mse:.2f}, RMSE: {night_rmse:.2f}, MAE: {night_mae:.2f}, R²: {r2_str}, MASE: {mase_str}")
     else:
         print("  Nighttime metrics: Not available (no nighttime data)")
 
@@ -415,7 +448,7 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
                 ["MSE", float(mse), float(day_mse), float(night_mse)],
                 ["RMSE", float(rmse), float(day_rmse), float(night_rmse)],
                 ["MAE", float(mae), float(day_mae), float(night_mae)],
-                ["WAPE", float(wape), float(day_wape), float(night_wape)],
+                ["MASE", float(mase), float(day_mase), float(night_mase)],
                 ["R²", float(r2), float(day_r2), float(night_r2)],
             ]
         )
@@ -436,7 +469,7 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
             f"{eval_prefix}mse": mse,
             f"{eval_prefix}rmse": rmse,
             f"{eval_prefix}mae": mae,
-            f"{eval_prefix}wape": wape,
+            f"{eval_prefix}mase": mase,
             f"{eval_prefix}r2": r2,
             f"{eval_prefix}inference_speed_samples_per_sec": samples_per_second,
             f"{eval_prefix}inference_time_ms_per_sample": avg_time_per_sample * 1000

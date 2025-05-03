@@ -615,14 +615,14 @@ def plot_evaluation_metrics(metrics, model_name=''):
     metrics_text += f"  MSE: {metrics['mse']:.2f}\n"
     metrics_text += f"  RMSE: {metrics['rmse']:.2f}\n"
     metrics_text += f"  MAE: {metrics['mae']:.2f}\n"
-    metrics_text += f"  WAPE: {metrics['wape']:.2f}\n"
+    metrics_text += f"  MASE: {metrics['mase']:.2f}\n"
     metrics_text += f"  R²: {metrics['r2']:.4f}\n\n"
 
     metrics_text += f"Daytime Metrics:\n"
     metrics_text += f"  MSE: {metrics['day_mse']:.2f}\n"
     metrics_text += f"  RMSE: {metrics['day_rmse']:.2f}\n"
     metrics_text += f"  MAE: {metrics['day_mae']:.2f}\n"
-    metrics_text += f"  WAPE: {metrics['day_wape']:.2f}\n"
+    metrics_text += f"  MASE: {metrics['day_mase']:.2f}\n"
     metrics_text += f"  R²: {metrics['day_r2']:.4f}\n\n"
 
     if has_nighttime:
@@ -630,7 +630,7 @@ def plot_evaluation_metrics(metrics, model_name=''):
         metrics_text += f"  MSE: {metrics['night_mse']:.2f}\n"
         metrics_text += f"  RMSE: {metrics['night_rmse']:.2f}\n"
         metrics_text += f"  MAE: {metrics['night_mae']:.2f}\n"
-        metrics_text += f"  WAPE: {metrics['night_wape']:.2f}\n"
+        metrics_text += f"  MASE: {metrics['night_mase']:.2f}\n"
         # Fix the f-string formatting - move conditional outside format specifier
         r2_str = f"{metrics['night_r2']:.4f}" if not np.isnan(metrics['night_r2']) else "N/A"
         metrics_text += f"  R²: {r2_str}\n\n"
@@ -684,8 +684,8 @@ def compare_models(model_metrics_dict, dataset_name=""):
         raise ValueError("No models provided for comparison")
 
     # Define metrics to compare
-    metrics = ['mse', 'rmse', 'mae', 'wape', 'r2']
-    metric_labels = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']
+    metrics = ['mse', 'rmse', 'mae', 'mase', 'r2']
+    metric_labels = ['MSE', 'RMSE', 'MAE', 'MASE', 'R²']
 
     # Include inference speed metrics if available
     inference_metrics = []
@@ -745,7 +745,7 @@ def plot_radar_chart(ax, df, model_names, model_color_map, title):
         title: Chart title
     """
     # Metrics to include in radar chart
-    metrics = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']
+    metrics = ['MSE', 'RMSE', 'MAE', 'MASE', 'R²']
 
     # Check dataframe orientation and adjust if needed
     if list(df.index) == model_names:
@@ -902,7 +902,7 @@ def plot_performance_metrics_bar(ax, comparison_df, model_names, model_color_map
         model_names: List of model names
         model_color_map: Dictionary mapping model names to colors
     """
-    performance_metrics = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']
+    performance_metrics = ['MSE', 'RMSE', 'MAE', 'MASE', 'R²']
 
     # Create a copy of the metrics data
     scaled_metrics_df = comparison_df.loc[performance_metrics].copy()
@@ -910,6 +910,7 @@ def plot_performance_metrics_bar(ax, comparison_df, model_names, model_color_map
     # Determine the scaling factor for MSE based on the max values of metrics
     mse_values = scaled_metrics_df.loc['MSE']
     mae_values = scaled_metrics_df.loc['MAE']
+    mase_values = scaled_metrics_df.loc['MASE']
     r2_values = scaled_metrics_df.loc['R²']
 
     # Calculate scaling factor to make MSE values comparable to MAE
@@ -925,6 +926,12 @@ def plot_performance_metrics_bar(ax, comparison_df, model_names, model_color_map
 
     # Scale up R² values
     scaled_metrics_df.loc['R²'] = r2_values * scaling_factor_r2
+
+    # Calculate scaling factor for MASE values to make them more visible
+    scaling_factor_mase = 100  # Scale MASE by 100 to make it comparable with other metrics
+
+    # Scale up MASE values
+    scaled_metrics_df.loc['MASE'] = mase_values * scaling_factor_mase
 
     # Set up the bar chart - grouped by metrics
     x = np.arange(len(performance_metrics))  # x positions for the metrics
@@ -948,7 +955,7 @@ def plot_performance_metrics_bar(ax, comparison_df, model_names, model_color_map
         f'MSE{f" (÷{scaling_factor_mse:.0f})" if scaling_factor_mse > 1 else ""}',
         'RMSE',
         'MAE',
-        'WAPE',
+        f'MASE{f" (×{scaling_factor_mase:.0f})" if scaling_factor_mase != 1 else ""}',
         f'R²{f" (×{scaling_factor_r2:.0f})" if scaling_factor_r2 != 1 else ""}'
     ])
     ax.grid(axis='y', linestyle='--', alpha=0.7)
@@ -965,6 +972,8 @@ def plot_performance_metrics_bar(ax, comparison_df, model_names, model_color_map
                 label_text = f'{orig_val:.1f}'
             elif metric == 'R²':
                 label_text = f'{orig_val:.4f}'
+            elif metric == 'MASE':
+                label_text = f'{orig_val:.2f}'
             else:
                 label_text = f'{orig_val:.1f}'
 
@@ -1017,7 +1026,7 @@ def plot_heatmap(ax, df, title):
         title: Chart title
     """
     # Check dataframe orientation
-    metrics_list = ['MSE', 'RMSE', 'MAE', 'WAPE', 'R²', 'Samples/sec', 'ms/sample']
+    metrics_list = ['MSE', 'RMSE', 'MAE', 'MASE', 'R²', 'Samples/sec', 'ms/sample']
 
     # Determine if we need to transpose the dataframe
     # If the index contains mostly metric names, keep as is
@@ -1045,7 +1054,7 @@ def plot_heatmap(ax, df, title):
         if max_val > min_val:
             if metric in ['R²', 'Samples/sec']:  # Higher is better
                 heatmap_df.loc[metric] = (values - min_val) / (max_val - min_val)
-            else:  # Lower is better (MSE, RMSE, MAE, ms/sample)
+            else:  # Lower is better (MSE, RMSE, MAE, MASE, ms/sample)
                 heatmap_df.loc[metric] = 1 - ((values - min_val) / (max_val - min_val))
         else:
             heatmap_df.loc[metric] = 0.5  # Default if all values are equal
@@ -1057,6 +1066,9 @@ def plot_heatmap(ax, df, title):
             orig_val = df_oriented.loc[metric, model]
             if metric == 'R²':
                 annot[i, j] = f"{orig_val:.4f}"
+            elif metric == 'MASE':
+                # Format MASE with 2 decimal places
+                annot[i, j] = f"{orig_val:.2f}"
             elif metric == 'ms/sample':
                 # Use more decimal places for very small values
                 if orig_val < 0.01:
@@ -1105,15 +1117,15 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
 
     # Create DataFrames for each time period (overall, daytime, nighttime)
     overall_data = {
-        'MSE': [], 'RMSE': [], 'MAE': [], 'WAPE': [], 'R²': []
+        'MSE': [], 'RMSE': [], 'MAE': [], 'MASE': [], 'R²': []
     }
 
     daytime_data = {
-        'MSE': [], 'RMSE': [], 'MAE': [], 'WAPE': [], 'R²': []
+        'MSE': [], 'RMSE': [], 'MAE': [], 'MASE': [], 'R²': []
     }
 
     nighttime_data = {
-        'MSE': [], 'RMSE': [], 'MAE': [], 'WAPE': [], 'R²': []
+        'MSE': [], 'RMSE': [], 'MAE': [], 'MASE': [], 'R²': []
     }
 
     # Extract metrics for each model
@@ -1124,21 +1136,21 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
         overall_data['MSE'].append(metrics['mse'])
         overall_data['RMSE'].append(metrics['rmse'])
         overall_data['MAE'].append(metrics['mae'])
-        overall_data['WAPE'].append(metrics['wape'])
+        overall_data['MASE'].append(metrics['mase'])
         overall_data['R²'].append(metrics['r2'])
 
         # Daytime metrics
         daytime_data['MSE'].append(metrics['day_mse'])
         daytime_data['RMSE'].append(metrics['day_rmse'])
         daytime_data['MAE'].append(metrics['day_mae'])
-        daytime_data['WAPE'].append(metrics['day_wape'])
+        daytime_data['MASE'].append(metrics['day_mase'])
         daytime_data['R²'].append(metrics['day_r2'])
 
         # Nighttime metrics
         nighttime_data['MSE'].append(metrics['night_mse'])
         nighttime_data['RMSE'].append(metrics['night_rmse'])
         nighttime_data['MAE'].append(metrics['night_mae'])
-        nighttime_data['WAPE'].append(metrics['night_wape'])
+        nighttime_data['MASE'].append(metrics['night_mase'])
         nighttime_data['R²'].append(metrics['night_r2'])
 
     # Create DataFrames
@@ -1158,7 +1170,7 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
 
     # Plot radar charts for each time period in the first row
     ax1 = fig.add_subplot(gs[0, 0], polar=True)
-    plot_radar_chart(ax1, overall_df[['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']], model_names, model_color_map, title='Overall Performance')
+    plot_radar_chart(ax1, overall_df[['MSE', 'RMSE', 'MAE', 'MASE', 'R²']], model_names, model_color_map, title='Overall Performance')
 
     ax2 = fig.add_subplot(gs[0, 1], polar=True)
     plot_radar_chart(ax2, daytime_df, model_names, model_color_map, title='Daytime Performance')
@@ -1168,7 +1180,7 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
 
     # Create heatmaps for each time period in the second row
     ax4 = fig.add_subplot(gs[1, 0])
-    plot_heatmap(ax4, overall_df[['MSE', 'RMSE', 'MAE', 'WAPE', 'R²']].transpose(), "Overall Metrics Heatmap")
+    plot_heatmap(ax4, overall_df[['MSE', 'RMSE', 'MAE', 'MASE', 'R²']].transpose(), "Overall Metrics Heatmap")
 
     ax5 = fig.add_subplot(gs[1, 1])
     plot_heatmap(ax5, daytime_df.transpose(), "Daytime Metrics Heatmap")
