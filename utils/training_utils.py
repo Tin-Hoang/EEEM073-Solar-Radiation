@@ -433,7 +433,7 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
         print("  Nighttime metrics: Not available (no nighttime data)")
 
     # Print inference speed metrics
-    print(f"  Inference Speed: {samples_per_second:.2f} samples/sec, {avg_time_per_sample*1000:.4f} ms/sample")
+    print(f"  Inference Speed: {samples_per_second:.2f} samples/sec, {avg_time_per_sample*1000000:.4f} μs/sample")
     print(f"  Total time: {total_inference_time:.4f} sec for {total_samples} samples")
 
     # Log to wandb if enabled
@@ -459,7 +459,7 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
             data=[
                 ["Total Inference Time (s)", float(total_inference_time)],
                 ["Total Samples", int(total_samples)],
-                ["Avg Time per Sample (ms)", float(avg_time_per_sample * 1000)],
+                ["Avg Time per Sample (μs)", float(avg_time_per_sample * 1000000)],
                 ["Samples per Second", float(samples_per_second)],
             ]
         )
@@ -472,7 +472,7 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
             f"{eval_prefix}mase": mase,
             f"{eval_prefix}r2": r2,
             f"{eval_prefix}inference_speed_samples_per_sec": samples_per_second,
-            f"{eval_prefix}inference_time_ms_per_sample": avg_time_per_sample * 1000
+            f"{eval_prefix}inference_time_us_per_sample": avg_time_per_sample * 1000000
         }
 
         # Create a sample predictions table

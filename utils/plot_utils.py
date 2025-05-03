@@ -645,7 +645,7 @@ def plot_evaluation_metrics(metrics, model_name=''):
     if has_inference_speed:
         metrics_text += f"\nInference Speed:\n"
         metrics_text += f"  Throughput: {metrics['samples_per_second']:.2f} samples/sec\n"
-        metrics_text += f"  Latency: {metrics['avg_time_per_sample'] * 1000:.3f} ms/sample\n"
+        metrics_text += f"  Latency: {metrics['avg_time_per_sample'] * 1000000:.3f} μs/sample\n"
 
         # Add context about total number of samples and time if available
         if 'total_samples' in metrics and 'total_inference_time' in metrics:
@@ -693,12 +693,12 @@ def compare_models(model_metrics_dict, dataset_name=""):
     first_model_metrics = next(iter(model_metrics_dict_copy.values()))
     if 'samples_per_second' in first_model_metrics:
         inference_metrics = ['samples_per_second', 'avg_time_per_sample']
-        inference_labels = ['Samples/sec', 'ms/sample']
+        inference_labels = ['Samples/sec', 'μs/sample']
 
-        # Convert ms/sample for better display
+        # Convert μs/sample for better display
         for metrics_dict in metrics_list:
             if 'avg_time_per_sample' in metrics_dict:
-                metrics_dict['avg_time_per_sample'] *= 1000  # Convert to milliseconds
+                metrics_dict['avg_time_per_sample'] *= 1000000  # Convert to microseconds
 
     # Create comparison DataFrame
     comparison = pd.DataFrame(index=metric_labels + inference_labels, columns=model_names)
@@ -762,7 +762,7 @@ def plot_radar_chart(ax, df, model_names, model_color_map, title):
 
     # Define parameters for enhanced normalization
     SENSITIVITY_FACTOR = 2.0  # Controls how much differences are amplified
-    MIN_RADIUS = 0.4  # Minimum radius for worst values (0.0-1.0)
+    MIN_RADIUS = 0.2  # Minimum radius for worst values (0.0-1.0)
 
     # Process each metric individually using enhanced normalization
     for metric in metrics:
@@ -846,7 +846,7 @@ def create_comparison_visualization(comparison_df, model_names, dataset_name="")
     """
     # Check if inference metrics are present
     has_inference_metrics = False
-    if 'Samples/sec' in comparison_df.index and 'ms/sample' in comparison_df.index:
+    if 'Samples/sec' in comparison_df.index and 'μs/sample' in comparison_df.index:
         has_inference_metrics = True
     rows = 2
     cols = 2
@@ -1026,7 +1026,7 @@ def plot_heatmap(ax, df, title):
         title: Chart title
     """
     # Check dataframe orientation
-    metrics_list = ['MSE', 'RMSE', 'MAE', 'MASE', 'R²', 'Samples/sec', 'ms/sample']
+    metrics_list = ['MSE', 'RMSE', 'MAE', 'MASE', 'R²', 'Samples/sec', 'μs/sample']
 
     # Determine if we need to transpose the dataframe
     # If the index contains mostly metric names, keep as is
@@ -1054,7 +1054,7 @@ def plot_heatmap(ax, df, title):
         if max_val > min_val:
             if metric in ['R²', 'Samples/sec']:  # Higher is better
                 heatmap_df.loc[metric] = (values - min_val) / (max_val - min_val)
-            else:  # Lower is better (MSE, RMSE, MAE, MASE, ms/sample)
+            else:  # Lower is better (MSE, RMSE, MAE, MASE, μs/sample)
                 heatmap_df.loc[metric] = 1 - ((values - min_val) / (max_val - min_val))
         else:
             heatmap_df.loc[metric] = 0.5  # Default if all values are equal
@@ -1067,9 +1067,9 @@ def plot_heatmap(ax, df, title):
             if metric == 'R²':
                 annot[i, j] = f"{orig_val:.4f}"
             elif metric == 'MASE':
-                # Format MASE with 2 decimal places
-                annot[i, j] = f"{orig_val:.2f}"
-            elif metric == 'ms/sample':
+                # Format MASE with 4 decimal places
+                annot[i, j] = f"{orig_val:.4f}"
+            elif metric == 'μs/sample':
                 # Use more decimal places for very small values
                 if orig_val < 0.01:
                     annot[i, j] = f"{orig_val:.5f}"
