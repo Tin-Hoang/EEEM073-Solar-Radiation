@@ -134,7 +134,7 @@ class DataEmbedding(nn.Module):
 
 class ProbAttention(nn.Module):
     """
-    Probability Sparse Attention - optimized implementation
+    Optimized ProbSparse Attention implementation
     """
     def __init__(self, mask_flag=True, factor=5, scale=None, attention_dropout=0.1, output_attention=False):
         super(ProbAttention, self).__init__()
@@ -146,177 +146,96 @@ class ProbAttention(nn.Module):
 
     def _prob_QK(self, Q, K, sample_k, n_top):
         # Q [B, H, L, D]
-        B, H, L, E = K.shape
-        _, _, S, _ = Q.shape
-
-        # Safety checks for parameters
-        sample_k = max(1, min(sample_k, L))  # Ensure sample_k is at least 1 and at most L
-        n_top = max(1, min(n_top, S))  # Ensure n_top is at least 1 and at most S
-
-        # Handle edge case where sequence is too short
-        if L <= 1 or S <= 1:
-            # For very short sequences, just use regular attention
-            Q_K = torch.matmul(Q, K.transpose(-2, -1))
-            # Use any valid index since we're returning full attention
-            rand_index = torch.zeros(B, H, n_top, dtype=torch.long, device=Q.device)
-            return Q_K, rand_index
+        B, H, L_K, E = K.shape
+        _, _, L_Q, _ = Q.shape
 
         # Calculate the sampled Q_K
-        K_expand = K.unsqueeze(-3).expand(B, H, S, L, E)
-        index_sample = torch.randint(L, (S, sample_k), device=Q.device)
-        K_sample = K_expand[:, :, torch.arange(S).unsqueeze(1), index_sample, :]
+        K_expand = K.unsqueeze(-3).expand(B, H, L_Q, L_K, E)
+
+        # Sample k keys for each query
+        index_sample = torch.randint(L_K, (L_Q, sample_k), device=Q.device)
+        K_sample = K_expand[:, :, torch.arange(L_Q, device=Q.device).unsqueeze(1), index_sample, :]
         Q_K_sample = torch.matmul(Q.unsqueeze(-2), K_sample.transpose(-2, -1)).squeeze(-2)
 
-        # Find the top-k query with largest magnitude
-        M = Q_K_sample.max(-1)[0] - torch.div(Q_K_sample.sum(-1), L)
-
-        # Make sure n_top is valid before calling topk
-        n_top = min(n_top, M.size(-1))
-        if n_top <= 0:
-            # If we can't select any, create a safe fallback
-            Q_K = torch.matmul(Q, K.transpose(-2, -1))
-            rand_index = torch.zeros(B, H, 1, dtype=torch.long, device=Q.device)
-            return Q_K, rand_index
-
+        # Find the Top_k query with sparsity measurement
+        M = Q_K_sample.max(-1)[0] - torch.div(Q_K_sample.sum(-1), L_K)
         M_top = M.topk(n_top, sorted=False)[1]
 
         # Use the reduced Q to calculate Q_K
-        Q_reduce = Q[torch.arange(B)[:, None, None],
-                     torch.arange(H)[None, :, None],
-                     M_top, :]
+        Q_reduce = Q[torch.arange(B, device=Q.device)[:, None, None],
+                     torch.arange(H, device=Q.device)[None, :, None],
+                     M_top, :].contiguous()
         Q_K = torch.matmul(Q_reduce, K.transpose(-2, -1))
 
         return Q_K, M_top
 
     def _get_initial_context(self, V, L_Q):
         B, H, L_V, D = V.shape
-
         if not self.mask_flag:
             # Use mean for non-causal attention
             V_mean = V.mean(dim=-2)
-            context = V_mean.unsqueeze(-2).expand(B, H, L_Q, D)
+            context = V_mean.unsqueeze(-2).expand(B, H, L_Q, D).clone()
         else:
             # Use cumulative sum for causal attention
-            if L_Q == L_V:
-                context = V.cumsum(dim=-2)
-            else:
-                # If lengths don't match, use mean
-                V_mean = V.mean(dim=-2)
-                context = V_mean.unsqueeze(-2).expand(B, H, L_Q, D)
-
+            context = V.cumsum(dim=-2).clone()
         return context
 
     def _update_context(self, context_in, V, scores, index, L_Q):
         B, H, L_V, D = V.shape
 
-        # Handle empty inputs with early return
-        if scores.numel() == 0 or index.numel() == 0:
-            return context_in, None
-
-        # Check that context_in has expected shape
-        expected_shape = (B, H, L_Q, D)
-        if context_in.shape != expected_shape:
-            # If shapes mismatch, resize context_in
-            resized_context = torch.zeros(expected_shape,
-                                         dtype=context_in.dtype,
-                                         device=context_in.device)
-
-            # Copy existing values where possible
-            min_batch = min(context_in.shape[0], B)
-            min_heads = min(context_in.shape[1], H)
-            min_len = min(context_in.shape[2], L_Q)
-            min_dim = min(context_in.shape[3], D)
-
-            resized_context[:min_batch, :min_heads, :min_len, :min_dim] = \
-                context_in[:min_batch, :min_heads, :min_len, :min_dim]
-
-            context_in = resized_context
-
-        # Apply mask for causal attention
         if self.mask_flag:
-            try:
-                scores_B, scores_H, scores_M, scores_L = scores.shape
-                prob_mask = ProbMask(B=scores_B, H=scores_H, L=scores_L,
-                                    index=index, scores=scores, device=V.device)
-                scores.masked_fill_(prob_mask.mask, -float('inf'))
-            except Exception as e:
-                print(f"Warning: Masking error: {e}")
-                # Continue without masking rather than failing
-                pass
+            attn_mask = ProbMask(B, H, L_Q, index, scores, device=V.device)
+            scores.masked_fill_(attn_mask.mask, -float('inf'))
 
-        # Apply softmax to get attention weights
         attn = torch.softmax(scores, dim=-1)
         attn = self.dropout(attn)
 
-        # Compute attended values
-        attended_values = torch.matmul(attn, V)
-
-        # Make a copy of context_in to avoid in-place issues with expanded tensors
+        # Create a new tensor instead of modifying in-place
         context = context_in.clone()
+        values_aggregated = torch.matmul(attn, V)
 
-        # Safe indexing for context update
-        try:
-            batch_indices = torch.arange(B, device=context.device)[:, None, None]
-            head_indices = torch.arange(H, device=context.device)[None, :, None]
-
-            # Check index is within bounds
-            if index.max() >= L_Q:
-                index = torch.clamp(index, 0, L_Q-1)
-
-            # Update context based on attention
-            context[batch_indices, head_indices, index, :] = attended_values
-        except Exception as e:
-            print(f"Warning: Context update error: {e}")
-            # Keep original context if update fails
-            pass
+        context[torch.arange(B, device=context.device)[:, None, None],
+               torch.arange(H, device=context.device)[None, :, None],
+               index, :] = values_aggregated
 
         if self.output_attention:
-            try:
-                attns = torch.zeros((B, H, L_Q, L_V), device=attn.device)
-                attns[torch.arange(B, device=attns.device)[:, None, None],
-                     torch.arange(H, device=attns.device)[None, :, None],
-                     index, :] = attn
-                return context, attns
-            except Exception as e:
-                print(f"Warning: Attention output error: {e}")
-                return context, None
+            attns = torch.zeros([B, H, L_Q, L_V], device=attn.device)
+            attns[torch.arange(B, device=attns.device)[:, None, None],
+                 torch.arange(H, device=attns.device)[None, :, None],
+                 index, :] = attn
+            return context, attns
         else:
             return context, None
 
     def forward(self, queries, keys, values, attn_mask=None):
-        B, L, H, D = queries.shape
-        _, S, _, _ = keys.shape
+        B, L_Q, H, D = queries.shape
+        _, L_K, _, _ = keys.shape
 
-        # Handle empty inputs with early return
-        if L == 0 or S == 0:
-            return torch.zeros((B, L, H * D), device=queries.device), None
+        queries = queries.transpose(2, 1).contiguous()  # [B, H, L_Q, D]
+        keys = keys.transpose(2, 1).contiguous()  # [B, H, L_K, D]
+        values = values.transpose(2, 1).contiguous()  # [B, H, L_V, D]
 
-        # Reshape inputs for attention computation
-        queries = queries.transpose(1, 2)  # [B, H, L, D]
-        keys = keys.transpose(1, 2)
-        values = values.transpose(1, 2)
-
-        # Calculate sampling parameters - avoid log(0)
-        U = max(1, int(self.factor * np.log(max(S, 2))))  # c*ln(L_k)
-        u = max(1, int(self.factor * np.log(max(L, 2))))  # c*ln(L_q)
+        # Compute sampling parameters
+        U_part = self.factor * np.ceil(np.log(L_K)).astype('int').item()  # c*ln(L_k)
+        u = self.factor * np.ceil(np.log(L_Q)).astype('int').item()  # c*ln(L_q)
 
         # Limit to sequence length
-        U = min(U, S)
-        u = min(u, L)
+        U_part = min(U_part, L_K)
+        u = min(u, L_Q)
 
         # Compute probabilistic attention
-        scores_top, index = self._prob_QK(queries, keys, u, U)
+        scores_top, index = self._prob_QK(queries, keys, sample_k=U_part, n_top=u)
 
         # Apply scaling
         scale = self.scale or 1. / math.sqrt(D)
         scores_top = scores_top * scale
 
         # Get context and update with attention
-        context = self._get_initial_context(values, L)
-        context, attn = self._update_context(context, values, scores_top, index, L)
+        context = self._get_initial_context(values, L_Q)
+        context, attn = self._update_context(context, values, scores_top, index, L_Q)
 
-        # Reshape output
-        context = context.transpose(1, 2).contiguous()
+        # Return to original shape
+        context = context.transpose(2, 1).contiguous()  # [B, L_Q, H, D]
 
         return context, attn
 
@@ -344,20 +263,28 @@ class AttentionLayer(nn.Module):
         _, S, _ = keys.shape
         H = self.n_heads
 
-        queries = self.query_projection(queries).view(B, L, H, -1)
-        keys = self.key_projection(keys).view(B, S, H, -1)
-        values = self.value_projection(values).view(B, S, H, -1)
+        # More efficient projections (avoiding unnecessary reshapes)
+        queries = self.query_projection(queries).reshape(B, L, H, -1).contiguous()
+        keys = self.key_projection(keys).reshape(B, S, H, -1).contiguous()
+        values = self.value_projection(values).reshape(B, S, H, -1).contiguous()
 
+        # Call the attention mechanism
         out, attn = self.inner_attention(
             queries,
             keys,
             values,
             attn_mask
         )
+
+        # Reshape back efficiently
         if self.mix:
             out = out.transpose(1, 2).contiguous()
-        out = out.view(B, L, -1)
+        else:
+            out = out.contiguous()
 
+        out = out.reshape(B, L, -1)
+
+        # Apply output projection
         return self.out_projection(out), attn
 
 
@@ -450,35 +377,27 @@ class ConvLayer(nn.Module):
     """
     def __init__(self, c_in):
         super(ConvLayer, self).__init__()
-        # Efficient implementation with one Conv1d and pooling
+        # Efficient implementation with single sequential block
         self.downConv = nn.Sequential(
-            nn.Conv1d(in_channels=c_in, out_channels=c_in, kernel_size=3,
-                     padding=1, stride=2),
+            nn.Conv1d(in_channels=c_in, out_channels=c_in,
+                      kernel_size=3, padding=1, stride=1),
             nn.BatchNorm1d(c_in),
             nn.ELU()
         )
-        self.maxPool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+        self.pool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
 
     def forward(self, x):
-        # Check if the sequence length is too short
-        if x.size(1) <= 4:  # Need at least 4 points for meaningful downsampling
-            # Return a simple downsampled version (take every other element)
-            return x[:, ::2, :]
+        # Fast path for very short sequences
+        if x.size(1) <= 2:
+            return x
 
-        # Efficient transposition and processing
-        x = x.transpose(1, 2)  # Batch, Features, Length
+        # Efficient processing path - create new tensor copies to avoid memory issues
+        x_trans = x.transpose(1, 2).contiguous()  # [B, C, L]
+        x_conv = self.downConv(x_trans)
+        x_pool = self.pool(x_conv)
+        x_out = x_pool.transpose(1, 2).contiguous()  # [B, L/2, C]
 
-        # Handle the case when the sequence length is too small for the pooling operation
-        if x.size(2) <= 3:
-            # Apply only the conv (no pooling) if sequence is very short
-            x = self.downConv(x)
-        else:
-            # Apply both conv and pooling for normal cases
-            x = self.downConv(x)
-            x = self.maxPool(x)
-
-        x = x.transpose(1, 2)  # Back to Batch, Length, Features
-        return x
+        return x_out
 
 
 class DecoderLayer(nn.Module):
@@ -587,10 +506,15 @@ class InformerModel(nn.Module):
             )
             attn_layers.append(encoder_layer)
 
+        # Create distillation conv layers - key for Informer's performance
+        conv_layers = None
+        if e_layers > 1:
+            conv_layers = [ConvLayer(d_model) for _ in range(e_layers-1)]
+
         # Encoder
         self.encoder = Encoder(
             attn_layers,
-            conv_layers=None,  # No distilling for simplicity
+            conv_layers=conv_layers,  # Enable distilling for better performance
             norm_layer=nn.LayerNorm(d_model)
         )
 

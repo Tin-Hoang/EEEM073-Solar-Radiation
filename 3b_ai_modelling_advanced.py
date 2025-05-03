@@ -6,6 +6,8 @@
 # 1. **TCN (Temporal Convolutional Network)** - Specialized convolutional architecture with dilated convolutions for sequence modeling
 # 2. **Transformer** - Attention-based architecture, adapted for time series forecasting
 # 3. **Informer** - Advanced Transformer variant optimized for long sequence time-series forecasting
+# 4. **TSMixer** - Simple yet effective architecture for time series forecasting
+# 5. **iTransformer** - Inverted Transformer architecture for time series forecasting
 #
 # ## Prerequisites
 #
@@ -367,7 +369,7 @@ tcn_model = TCNModel(
     static_dim=static_dim,
     num_channels=[32, 64, 64, 32],  # Number of channels in each layer
     kernel_size=3,                    # Size of the convolutional kernel
-    dropout=0.2,                      # Dropout rate
+    dropout=0.1,                      # Dropout rate
 ).to(device)
 
 # Print the model
@@ -403,9 +405,9 @@ transformer_model = TransformerModel(
     static_dim=static_dim,            # Dimension of static features
     d_model=128,                      # Model dimension
     n_heads=4,                        # Number of attention heads
-    e_layers=1,                       # Number of encoder layers
+    e_layers=2,                       # Number of encoder layers
     d_ff=256,                         # Dimension of feedforward network
-    dropout=0.2,                      # Dropout rate
+    dropout=0.1,                      # Dropout rate
     activation='gelu'                 # Activation function
 ).to(device)
 
@@ -440,7 +442,7 @@ transformer_history, transformer_val_metrics, transformer_test_metrics = run_exp
 # For solar radiation forecasting, Informer can efficiently capture daily, weekly, and seasonal patterns while focusing computational resources on the most informative timestamps.
 
 # %%
-from models.informer import InformerModel
+from models.informer_mimick import InformerModel
 
 # Create Informer model
 informer_model = InformerModel(
@@ -448,14 +450,10 @@ informer_model = InformerModel(
     static_dim=static_dim,
     d_model=128,
     n_heads=4,
-    e_layers=1,
+    e_layers=2,
     d_ff=256,
-    dropout=0.2,
-    # attn='prob',
-    # distil=True,  # Enable distillation for better performance
-    # output_attention=False,
-    # mix=False,
-    # pred_len=1
+    dropout=0.1,
+    activation='gelu',
 ).to(device)
 
 # Print the model
@@ -476,7 +474,6 @@ informer_history, informer_val_metrics, informer_test_metrics = run_experiment_p
     patience=PATIENCE,
     lr=LR
 )
-
 
 # %% [markdown]
 # ### 3.5 TSMixer Model
@@ -499,10 +496,10 @@ tsmixer_model = TSMixerModel(
     lookback=LOOKBACK,
     horizon=1,             # Single-step prediction
     ff_dim=256,            # Feed-forward dimension
-    num_blocks=8,          # Number of TSMixer blocks
+    num_blocks=10,          # Number of TSMixer blocks
     norm_type='batch',
     activation='relu',
-    dropout=0.2
+    dropout=0.1
 ).to(device)
 
 # Print the model
@@ -546,7 +543,7 @@ itransformer_model = iTransformerModel(
     n_heads=4,                        # Number of attention heads
     e_layers=2,                       # Number of encoder layers
     d_ff=256,                         # Dimension of feedforward network
-    dropout=0.2,                      # Dropout rate
+    dropout=0.1,                      # Dropout rate
     lookback=LOOKBACK,                # Historical sequence length
     pred_len=1                        # Prediction length
 ).to(device)
