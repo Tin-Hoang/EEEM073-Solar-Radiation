@@ -9,6 +9,9 @@ Reference:
     - iTransformer: Inverted Transformers Are Effective for Time Series Forecasting
     - Paper: https://arxiv.org/abs/2310.06625
     - GitHub: https://github.com/thuml/iTransformer
+
+Modified by: Tin Hoang (for GHI forecasting)
+Date: 02/05/2025
 """
 
 import torch
@@ -133,10 +136,16 @@ class iTransformerModel(nn.Module):
             pred_len: Prediction sequence length
         """
         super(iTransformerModel, self).__init__()
-
+        # Save init parameters for later model loading
+        self.input_dim = input_dim
+        self.static_dim = static_dim
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.e_layers = e_layers
+        self.d_ff = d_ff
+        self.dropout = dropout
         self.lookback = lookback
         self.pred_len = pred_len
-        self.input_dim = input_dim
 
         # Token embedding to embed each feature as a token
         self.embedding = TokenEmbedding(lookback, d_model)

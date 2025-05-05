@@ -978,7 +978,7 @@ def plot_performance_metrics_bar(ax, comparison_df, model_names, model_color_map
                 label_text = f'{orig_val:.1f}'
 
             ax.text(rect.get_x() + rect.get_width()/2., height + 0.05*scaled_metrics_df.loc[metric].max(),
-                     label_text, ha='center', va='bottom', fontsize=8, rotation=0)
+                     label_text, ha='center', va='bottom', fontsize=8, rotation=90)
 
 
 def plot_inference_speed_bar(ax, comparison_df, model_names, model_color_map):
@@ -1202,7 +1202,7 @@ def compare_models_daytime_nighttime(model_metrics_dict, dataset_name=""):
     return fig
 
 
-def plot_predictions_over_time(models, model_names, data_loader, target_scaler, num_samples=200, start_idx=0):
+def plot_predictions_over_time(models, model_names, data_loader, target_scaler, num_samples=200, start_idx=0, device=None):
     """
     Plot time series predictions for multiple models with nighttime shading if available
 
@@ -1213,9 +1213,11 @@ def plot_predictions_over_time(models, model_names, data_loader, target_scaler, 
         target_scaler: Scaler for the target variable
         num_samples: Number of consecutive time steps to plot
         start_idx: Starting index in the dataset
+        device: Device to run the model on
     """
     # Get device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Collect data samples
     all_batches = []

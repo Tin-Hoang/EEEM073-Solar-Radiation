@@ -15,6 +15,12 @@ class MLPModel(nn.Module):
             lookback: Number of time steps to look back
         """
         super(MLPModel, self).__init__()
+        # Save init parameters for later model loading
+        self.input_dim = input_dim
+        self.static_dim = static_dim
+        self.hidden_dims = hidden_dims
+        self.dropout = dropout
+        self.lookback = lookback
 
         # Calculate flattened input size
         self.flatten_dim = input_dim * lookback

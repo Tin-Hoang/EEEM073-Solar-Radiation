@@ -45,6 +45,15 @@ class TransformerModel(nn.Module):
             dropout: Dropout rate
         """
         super(TransformerModel, self).__init__()
+        # Save init parameters
+        self.input_dim = input_dim
+        self.static_dim = static_dim
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.e_layers = e_layers
+        self.d_ff = d_ff
+        self.dropout = dropout
+        self.activation = activation
 
         # Data projection
         self.enc_embedding = nn.Linear(input_dim, d_model)

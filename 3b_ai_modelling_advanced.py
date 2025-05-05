@@ -22,6 +22,16 @@
 # 5. **Visualization** - Plot time series predictions and model comparisons
 
 # %% [markdown]
+# ## 0. Debug Mode
+#
+# **IMPORTANT**: Set to True for code debugging mode and False for actual training.
+# In debug mode, the code will only run 10 batches/epoch for 10 epochs.
+
+# %%
+# Debug mode to test code. Set to False for actual training
+DEBUG_MODE = True
+
+# %% [markdown]
 # # 1. Data Loading
 #
 # In this section, we load and prepare the preprocessed time series data for training our advanced models. The data includes various weather features like temperature, wind speed, solar angles, etc., used to predict the Global Horizontal Irradiance (GHI).
@@ -33,9 +43,9 @@
 
 # %%
 # Load autoreload extension
-%load_ext autoreload
+# %load_ext autoreload
 # Set autoreload to mode 1
-%autoreload 2
+# %autoreload 2
 
 # Import required libraries
 import os
@@ -69,8 +79,6 @@ print(f"Using {device} device")
 # ========== Model training hyperparameters =========
 PATIENCE = 5  # Early stopping patience
 LR = 0.0001
-# Debug mode to test code. Set to False for actual training
-DEBUG_MODE = True
 
 if DEBUG_MODE:
     # Local debug settings (to check if the code is working)
@@ -367,7 +375,7 @@ from models.tcn import TCNModel
 tcn_model = TCNModel(
     input_dim=temporal_dim,
     static_dim=static_dim,
-    num_channels=[32, 64, 64, 32],  # Number of channels in each layer
+    num_channels=[32, 64, 64, 32],    # Number of channels in each layer
     kernel_size=3,                    # Size of the convolutional kernel
     dropout=0.1,                      # Dropout rate
 ).to(device)
@@ -391,10 +399,9 @@ tcn_history, tcn_val_metrics, tcn_test_metrics = run_experiment_pipeline(
     lr=LR
 )
 
-
+# %% [markdown]
 # ### 3.3 Transformer Model
 # Same as the Transformer model but with LayerNorm instead of BatchNorm
-
 
 # %%
 from models.transformer import TransformerModel
@@ -405,7 +412,7 @@ transformer_model = TransformerModel(
     static_dim=static_dim,            # Dimension of static features
     d_model=128,                      # Model dimension
     n_heads=4,                        # Number of attention heads
-    e_layers=2,                       # Number of encoder layers
+    e_layers=1,                       # Number of encoder layers
     d_ff=256,                         # Dimension of feedforward network
     dropout=0.1,                      # Dropout rate
     activation='gelu'                 # Activation function
@@ -413,7 +420,6 @@ transformer_model = TransformerModel(
 
 # Print the model
 print_model_info(transformer_model, temporal_features.shape, static_features.shape)
-
 
 # %%
 model_name = "Transformer"
@@ -450,7 +456,7 @@ informer_model = InformerModel(
     static_dim=static_dim,
     d_model=128,
     n_heads=4,
-    e_layers=2,
+    e_layers=1,
     d_ff=256,
     dropout=0.1,
     activation='gelu',
@@ -541,7 +547,7 @@ itransformer_model = iTransformerModel(
     static_dim=static_dim,            # Number of static features
     d_model=128,                      # Model dimension
     n_heads=4,                        # Number of attention heads
-    e_layers=2,                       # Number of encoder layers
+    e_layers=1,                       # Number of encoder layers
     d_ff=256,                         # Dimension of feedforward network
     dropout=0.1,                      # Dropout rate
     lookback=LOOKBACK,                # Historical sequence length

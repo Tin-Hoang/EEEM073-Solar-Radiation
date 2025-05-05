@@ -16,10 +16,13 @@ class LSTMModel(nn.Module):
             bidirectional: Whether to use bidirectional LSTM
         """
         super(LSTMModel, self).__init__()
-
-        # Save parameters
-        self.bidirectional = bidirectional
+        # Save init parameters for later model loading
+        self.input_dim = input_dim
+        self.static_dim = static_dim
         self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.dropout = dropout
+        self.bidirectional = bidirectional
 
         # LSTM for temporal features
         self.lstm = nn.LSTM(

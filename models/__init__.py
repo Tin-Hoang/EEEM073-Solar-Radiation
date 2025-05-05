@@ -6,7 +6,6 @@ from .tcn import TCNModel
 from .transformer_batchnorm import TransformerBNModel
 from .cnn_lstm import CNNLSTMModel
 from .informer import InformerModel
-from .informer_hf import HFInformerModel
 from .tsmixer import TSMixerModel
 from .transformer import TransformerModel
 from .itransformer import iTransformerModel
@@ -21,7 +20,6 @@ __all__ = [
     'TransformerModel',
     'CNNLSTMModel',
     'InformerModel',
-    'HFInformerModel',
     'TSMixerModel',
     'iTransformerModel',
 ]

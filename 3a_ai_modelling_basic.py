@@ -21,6 +21,16 @@
 # 5. **Visualization** - Plot time series predictions and model comparisons
 
 # %% [markdown]
+# ## 0. Debug Mode
+#
+# **IMPORTANT**: Set to True for code debugging mode and False for actual training.
+# In debug mode, the code will only run 10 batches/epoch for 10 epochs.
+
+# %%
+# Debug mode to test code. Set to False for actual training
+DEBUG_MODE = True
+
+# %% [markdown]
 # # 1. Data Loading
 #
 # In this section, we load and prepare the preprocessed time series data for training our models. The data includes various weather features like temperature, wind speed, solar angles, etc., used to predict the Global Horizontal Irradiance (GHI).
@@ -32,9 +42,9 @@
 
 # %%
 # Load autoreload extension
-%load_ext autoreload
+# %load_ext autoreload
 # Set autoreload to mode 1
-%autoreload 2
+# %autoreload 2
 
 # Import required libraries
 import os
@@ -68,8 +78,6 @@ print(f"Using {device} device")
 # ========== Model training hyperparameters =========
 PATIENCE = 5  # Early stopping patience
 LR = 0.0001
-# Debug mode to test code. Set to False for actual training
-DEBUG_MODE = True
 
 if DEBUG_MODE:
     # Local debug settings (to check if the code is working)
@@ -166,7 +174,6 @@ test_dataset = TimeSeriesDataset(TEST_PREPROCESSED_DATA_PATH, lookback=LOOKBACK,
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
-
 
 # %%
 # Examining data dimensions to configure model architectures

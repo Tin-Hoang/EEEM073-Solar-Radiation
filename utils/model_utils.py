@@ -398,7 +398,7 @@ def load_model(filepath, device=None, model_class=None):
                     print(f"Using default hidden_dims={filtered_params['hidden_dims']} for MLPModel")
 
                 if 'lookback' in still_missing and 'lookback' in metadata.get('config', {}):
-                    filtered_params['lookback'] = metadata['config']['lookback']
+                    filtered_params['lookback'] = metadata['config']['LOOKBACK']
                     print(f"Using lookback={filtered_params['lookback']} from config")
 
             # Update missing params list
@@ -410,104 +410,13 @@ def load_model(filepath, device=None, model_class=None):
         # Continue with original parameters if inspection fails
         filtered_params = model_init_params
 
-    # Extract hyperparameters from the saved model state_dict
-    if model_class.__name__ == 'InformerModel':
-        # Try to extract hyperparameters from model state dictionary dimensions
-        if 'enc_embedding.weight' in state_dict:
-            input_dim = state_dict['enc_embedding.weight'].shape[1]
-            d_model = state_dict['enc_embedding.weight'].shape[0]
-            print(f"Extracted from state_dict: input_dim={input_dim}, d_model={d_model}")
-
-            # Update filtered params
-            if 'input_dim' in allowed_params:
-                filtered_params['input_dim'] = input_dim
-
-            if 'd_model' in allowed_params:
-                filtered_params['d_model'] = d_model
-
-        # Get number of heads from the in_proj_weight shape
-        if 'transformer_encoder.layers.0.self_attn.in_proj_weight' in state_dict:
-            in_proj_weight = state_dict['transformer_encoder.layers.0.self_attn.in_proj_weight']
-            # For transformer attention, in_proj_weight shape is [3*d_model, d_model] where first dimension is Q,K,V combined
-            n_heads = in_proj_weight.shape[0] // (3 * (in_proj_weight.shape[1] // 8))  # 8 is common dim per head
-            print(f"Estimated n_heads={n_heads} from state_dict")
-
-            if 'n_heads' in allowed_params:
-                filtered_params['n_heads'] = n_heads
-
-        # Get number of encoder layers by counting them in state_dict
-        e_layers = 0
-        for key in state_dict:
-            if 'transformer_encoder.layers.' in key:
-                layer_num = int(key.split('.')[2])
-                e_layers = max(e_layers, layer_num + 1)
-
-        if e_layers > 0 and 'e_layers' in allowed_params:
-            print(f"Detected e_layers={e_layers} from state_dict")
-            filtered_params['e_layers'] = e_layers
-
-        # Get feedforward dimension from linear1 weight
-        if 'transformer_encoder.layers.0.linear1.weight' in state_dict:
-            d_ff = state_dict['transformer_encoder.layers.0.linear1.weight'].shape[0]
-            print(f"Extracted d_ff={d_ff} from state_dict")
-
-            if 'd_ff' in allowed_params:
-                filtered_params['d_ff'] = d_ff
-
-        # Also check for existing hyperparameters in config
-        config_params = ['d_model', 'n_heads', 'e_layers', 'd_ff', 'dropout', 'activation']
-        for param in config_params:
-            if param in config and param in allowed_params and param not in filtered_params:
-                filtered_params[param] = config[param]
-                print(f"Using {param}={filtered_params[param]} from config")
-
     # Try to create model instance
     try:
         print(f"Creating model with parameters: {filtered_params}")
         model = model_class(**filtered_params)
     except Exception as e:
         print(f"Error creating model instance: {e}")
-
-        # If there are fallback parameter values we can try, use them
-        if model_class.__name__ == 'MLPModel':
-            print("Trying to create MLPModel with default parameter values...")
-            temporal_features = metadata.get('temporal_features', [])
-            static_features = metadata.get('static_features', [])
-            input_dim = len(temporal_features) if temporal_features else 10
-            static_dim = len(static_features) if static_features else 2
-            try:
-                model = model_class(input_dim=input_dim, static_dim=static_dim, hidden_dims=[256, 128, 64])
-                print(f"Created MLPModel with input_dim={input_dim}, static_dim={static_dim}")
-            except Exception as fallback_error:
-                print(f"Failed with fallback parameters: {fallback_error}")
-                raise ValueError(f"Could not instantiate model class {model_class.__name__}. Check model definition and parameters.")
-        elif model_class.__name__ == 'InformerModel':
-            print(f"Trying to create InformerModel with extracted parameters from state_dict...")
-            try:
-                # Get basic dimensions from state_dict
-                input_dim = state_dict['enc_embedding.weight'].shape[1]
-                d_model = state_dict['enc_embedding.weight'].shape[0]
-                static_dim = state_dict['static_proj.0.weight'].shape[1]
-                d_ff = state_dict['transformer_encoder.layers.0.linear1.weight'].shape[0]
-
-                # Create with extracted parameters
-                model = model_class(
-                    input_dim=input_dim,
-                    static_dim=static_dim,
-                    d_model=d_model,
-                    d_ff=d_ff,
-                    n_heads=n_heads if 'n_heads' in locals() else 8,
-                    e_layers=e_layers if 'e_layers' in locals() else 3,
-                    dropout=0.1,
-                    activation='gelu'
-                )
-                print(f"Created InformerModel with extracted parameters")
-            except Exception as fallback_error:
-                print(f"Failed with fallback parameters: {fallback_error}")
-                raise ValueError(f"Could not instantiate model class {model_class.__name__}. Check model definition and parameters.")
-        else:
-            raise ValueError(f"Could not instantiate model class {model_class.__name__}. Check model definition and parameters.")
-
+        raise ValueError(f"Could not instantiate model class {model_class.__name__}. Check model definition and parameters.")
     # Load state dictionary
     try:
         model.load_state_dict(state_dict)

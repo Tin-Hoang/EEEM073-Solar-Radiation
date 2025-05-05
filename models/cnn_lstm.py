@@ -18,10 +18,15 @@ class CNNLSTMModel(nn.Module):
             bidirectional: Whether to use bidirectional LSTM
         """
         super(CNNLSTMModel, self).__init__()
-
-        # Save parameters
-        self.bidirectional = bidirectional
+        # Save init parameters for later model loading
+        self.input_dim = input_dim
+        self.static_dim = static_dim
         self.hidden_dim = hidden_dim
+        self.num_filters = num_filters
+        self.kernel_size = kernel_size
+        self.num_layers = num_layers
+        self.dropout = dropout
+        self.bidirectional = bidirectional
 
         # CNN for feature extraction
         self.cnn = nn.Sequential(

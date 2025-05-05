@@ -94,6 +94,12 @@ class TCNModel(nn.Module):
             dropout: Dropout rate
         """
         super(TCNModel, self).__init__()
+        # Save init parameters for later model loading
+        self.input_dim = input_dim
+        self.static_dim = static_dim
+        self.num_channels = num_channels
+        self.kernel_size = kernel_size
+        self.dropout = dropout
 
         # TCN for temporal features
         self.tcn = TemporalConvNet(input_dim, num_channels, kernel_size=kernel_size, dropout=dropout)

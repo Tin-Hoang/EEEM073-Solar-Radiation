@@ -472,6 +472,15 @@ class InformerModel(nn.Module):
     def __init__(self, input_dim, static_dim, d_model=512, n_heads=8, e_layers=3, d_ff=512,
                  dropout=0.0, activation='gelu'):
         super(InformerModel, self).__init__()
+        # Save init parameters for later model loading
+        self.input_dim = input_dim
+        self.static_dim = static_dim
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.e_layers = e_layers
+        self.d_ff = d_ff
+        self.dropout = dropout
+        self.activation = activation
 
         # Input embedding using TokenEmbedding (Conv1d-based)
         self.enc_embedding = TokenEmbedding(input_dim, d_model)

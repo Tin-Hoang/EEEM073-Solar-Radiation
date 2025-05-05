@@ -19,7 +19,7 @@ from torchtsmixer import TSMixer as BaseTSMixer
 
 
 class TSMixerModel(nn.Module):
-    def __init__(self, input_dim, static_dim, lookback=24, horizon=24, ff_dim=128, num_blocks=2, norm_type='batch',
+    def __init__(self, input_dim, static_dim, lookback=24, horizon=1, ff_dim=128, num_blocks=2, norm_type='batch',
                  activation='relu', dropout=0.2):
         """
         TSMixer model for time series forecasting
@@ -36,6 +36,16 @@ class TSMixerModel(nn.Module):
             dropout: Dropout rate
         """
         super(TSMixerModel, self).__init__()
+        # Save init parameters
+        self.input_dim = input_dim
+        self.static_dim = static_dim
+        self.lookback = lookback
+        self.horizon = horizon
+        self.ff_dim = ff_dim
+        self.num_blocks = num_blocks
+        self.norm_type = norm_type
+        self.activation = activation
+        self.dropout = dropout
 
         # Base TSMixer model for temporal features
         self.tsmixer = BaseTSMixer(
@@ -66,9 +76,6 @@ class TSMixerModel(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(64, 1)  # Single output value
         )
-
-        self.lookback = lookback
-        self.horizon = horizon
 
     def forward(self, temporal_features, static_features):
         """

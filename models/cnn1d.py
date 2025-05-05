@@ -20,16 +20,15 @@ class CNN1DModel(nn.Module):
             dropout: Dropout rate
         """
         super(CNN1DModel, self).__init__()
-
-        # Input validation
-        assert len(num_filters) == len(kernel_sizes), "num_filters and kernel_sizes must have the same length"
-
-        # Store parameters
+        # Save init parameters for later model loading
         self.input_dim = input_dim
         self.static_dim = static_dim
         self.num_filters = num_filters
         self.kernel_sizes = kernel_sizes
         self.dropout = dropout
+
+        # Input validation
+        assert len(num_filters) == len(kernel_sizes), "num_filters and kernel_sizes must have the same length"
 
         # Build CNN layers
         self.cnn_layers = nn.ModuleList()

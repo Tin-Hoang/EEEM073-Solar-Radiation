@@ -17,9 +17,9 @@
 
 # %%
 # Load autoreload extension
-%load_ext autoreload
+# %load_ext autoreload
 # Set autoreload to mode 2
-%autoreload 2
+# %autoreload 2
 
 import os
 import sys
@@ -195,7 +195,7 @@ viz_fig = plot_predictions_over_time(
     data_loader=test_loader,
     target_scaler=target_scaler,
     num_samples=72,  # Adjust as needed
-    start_idx=0       # Adjust as needed
+    start_idx=40       # Adjust as needed
 )
 
 # Display the plot if in a notebook environment
