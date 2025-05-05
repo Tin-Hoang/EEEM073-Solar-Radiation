@@ -9,6 +9,17 @@
 #
 # These techniques help make models more energy-efficient and computationally efficient, which is crucial for sustainability in AI applications.
 
+
+# %% [markdown]
+# ## 0. Debug Mode
+#
+# **IMPORTANT**: Set to True for code debugging mode and False for actual training.
+# In debug mode, the code will only run 10 batches/epoch for 10 epochs.
+
+# %%
+# Debug mode to test code. Set to False for actual training
+DEBUG_MODE = True
+
 # %% [markdown]
 # ## Setup and Imports
 
@@ -18,6 +29,8 @@
 # Set autoreload to mode 2
 # %autoreload 2
 
+from datetime import datetime
+import json
 import os
 import time
 import torch
@@ -37,11 +50,11 @@ from sklearn.metrics import mean_absolute_error
 
 # Import project utilities
 from utils.model_utils import load_model, save_model, print_model_info
-from utils.data_persistence import load_normalized_data, load_scalers
+from utils.data_persistence import load_scalers
 from utils.plot_utils import plot_predictions_over_time
 from utils.timeseriesdataset import TimeSeriesDataset
-from utils.training_utils import train_model, evaluate_model
-from models.informer_mimick import InformerModel
+from utils.training_utils import evaluate_model
+from models.transformer import TransformerModel
 
 # For reproducibility
 torch.manual_seed(42)
@@ -62,7 +75,7 @@ TEST_PREPROCESSED_DATA_PATH = "data/processed/test_normalized_20250430_145205.h5
 SCALER_PATH = "data/processed/scalers_20250430_145206.pkl"
 # Choose the model checkpoint from the previous experiment
 # PRETRAINED_MODEL_PATH = "checkpoints/MLP_best_20250504_052621.pt"
-PRETRAINED_MODEL_PATH = "checkpoints/Transformer_best_20250503_232818.pt"
+PRETRAINED_MODEL_PATH = "checkpoints/Transformer_best_20250504_155841.pt"
 
 # Dataset settings
 LOOKBACK = 24
@@ -73,24 +86,27 @@ SELECTED_FEATURES = [
     'surface_albedo', 'nighttime_mask', 'cld_opd_dcomp', 'aod'
 ]
 STATIC_FEATURES = ['latitude', 'longitude', 'elevation']
-
+TIME_FEATURES = ['hour_sin', 'hour_cos', 'day_sin', 'day_cos',
+            'month_sin', 'month_cos', 'dow_sin', 'dow_cos']
 # Quantization settings
 QUANTIZATION_DTYPE = torch.qint8
 
 # Distillation Training settings
-BATCH_SIZE = 2**10
-NUM_WORKERS = 16
-EPOCHS = 2
-LEARNING_RATE = 0.0005
-PATIENCE = 5
-
-# Student model settings
-STUDENT_D_MODEL = 256  # Half of the original model's dimension
-STUDENT_N_HEADS = 4    # Half of the original model's heads
-STUDENT_E_LAYERS = 2   # Reduced number of encoder layers
-
-# Debug settings
-DEBUG_MODE = True  # Set to True to run only 10 batches per epoch for quick debugging
+PATIENCE = 5  # Early stopping patience
+LR = 0.0001
+if DEBUG_MODE:
+    BATCH_SIZE = 2**10
+    NUM_WORKERS = 4
+    EPOCHS = 10
+else:
+    BATCH_SIZE = 2**13
+    NUM_WORKERS = 16
+    EPOCHS = 30
+# Student model settings (should be lower than the original model)
+STUDENT_D_MODEL = 128
+STUDENT_N_HEADS = 2
+STUDENT_E_LAYERS = 1
+STUDENT_D_FF = 128
 
 # %% [markdown]
 # ## Helper Functions for Evaluation
@@ -186,11 +202,24 @@ print("Data loading successful.")
 
 print(f"Loading model from {PRETRAINED_MODEL_PATH}")
 original_model, metadata = load_model(PRETRAINED_MODEL_PATH, device=device)
+base_checkpoint_name = os.path.splitext(os.path.basename(PRETRAINED_MODEL_PATH))[0]
 model_name = metadata['model_name']
 # Print model information
 print_model_info(original_model,
                 temporal_shape=sample_input[0].shape,
                 static_shape=sample_input[1].shape)
+
+# Warm up the model to avoid first batch overhead
+print("Warming up model...")
+n_warmup_batches = 10
+original_model.eval()
+with torch.no_grad():
+    for i in range(n_warmup_batches):
+        batch = next(iter(test_loader))
+        temporal_features = batch['temporal_features'].to(device)
+        static_features = batch['static_features'].to(device)
+        original_model(temporal_features, static_features)
+print("Model warmed up.")
 
 # Evaluate original model
 original_metrics = print_model_report(model_name, original_model, test_loader, scalers, device=device)
@@ -252,7 +281,7 @@ wrapper = OnnxModelWrapper(original_model).eval().to(cpu_device)
 sample_input_cpu = (sample_input[0].cpu(), sample_input[1].cpu())
 
 # Export the original model to ONNX
-onnx_model_path = f"checkpoints/{model_name}_original.onnx"
+onnx_model_path = f"checkpoints/{base_checkpoint_name}_original.onnx"
 print(f"Exporting original model to ONNX at {onnx_model_path}")
 torch.onnx.export(
     wrapper,
@@ -272,7 +301,7 @@ orig_onnx_size = os.path.getsize(onnx_model_path) / (1024 * 1024)
 print(f"Original ONNX model size: {orig_onnx_size:.2f} MB")
 
 # Apply dynamic quantization with ONNX Runtime
-quantized_onnx_model_path = f"checkpoints/{model_name}_quantized.onnx"
+quantized_onnx_model_path = f"checkpoints/{base_checkpoint_name}_quantized_int8.onnx"
 print(f"Quantizing ONNX model to {quantized_onnx_model_path}")
 quantize_dynamic(
     model_input=onnx_model_path,
@@ -374,8 +403,8 @@ def evaluate_onnx_model_gpu(model_path, provider='CUDAExecutionProvider', fp16_m
     sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
     # Silence provider assignment warnings - these are expected and normal
-    sess_options.add_session_config_entry("session.log.severity", "1")  # Set log level to WARNING (2) or ERROR (3)
-    sess_options.log_severity_level = 1  # Set to 1 for detailed logs
+    sess_options.add_session_config_entry("session.log.severity", "2")  # Set log level to WARNING (2) or ERROR (3)
+    sess_options.log_severity_level = 2
 
     # Create inference session with CUDA provider
     # Add CPU provider as a fallback because not all operations are supported on GPU
@@ -462,7 +491,7 @@ def evaluate_onnx_model_gpu(model_path, provider='CUDAExecutionProvider', fp16_m
     }
 
 # Create an FP16 quantized model specifically for GPU
-quantized_fp16_path = f"checkpoints/{model_name}_quantized_fp16.onnx"
+quantized_fp16_path = f"checkpoints/{base_checkpoint_name}_quantized_fp16.onnx"
 print(f"Creating FP16 quantized model for GPU at {quantized_fp16_path}")
 
 # Use the convert_float_to_float16 utility from ONNX
@@ -498,299 +527,424 @@ print()
 # %% [markdown]
 # ## Technique 2: Structured Pruning
 #
-# Structured pruning removes less important components like attention heads to reduce the number of parameters.
+# Structured pruning removes less important components to reduce the number of parameters.
 
 # %%
-class PrunableInformer(InformerModel):
-    """Informer model with pruning capabilities."""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+print("\n===== Technique 2: Structured Pruning =====")
 
-    def prune_heads(self, head_nums_to_prune):
-        """Prune specified attention heads in all encoder layers."""
-        for layer_idx, layer in enumerate(self.transformer_encoder.layers):
-            # Get the attention layer
-            attn_layer = layer.self_attn
+# Apply structured pruning to the transformer model using PyTorch's pruning utilities
+def apply_structured_pruning(model, amount=0.3):
+    """
+    Apply structured pruning to a model using PyTorch's pruning utilities.
 
-            # Get number of attention heads and head dimension
-            n_heads = attn_layer.nhead
-            head_dim = attn_layer.in_proj_weight.shape[0] // n_heads
+    Args:
+        model: The model to prune
+        amount: The proportion of weights to prune (0-1)
 
-            # Create a mask for heads: 1 for keeping, 0 for pruning
-            head_mask = torch.ones(n_heads, device=device)
-            for head_idx in head_nums_to_prune:
-                if head_idx < n_heads:
-                    head_mask[head_idx] = 0
+    Returns:
+        Pruned model
+    """
+    # Create a copy of the model to avoid modifying the original
+    pruned_model = copy.deepcopy(model)
 
-            # Expand mask to cover all dimensions for each attention component
-            expanded_mask = head_mask.repeat_interleave(head_dim).view(1, -1)
+    # Track which layers were pruned
+    pruned_layers = []
 
-            # Apply masks to the projection layers
-            attn_layer.in_proj_weight.data *= expanded_mask.unsqueeze(-1)
-            attn_layer.out_proj.weight.data *= expanded_mask.unsqueeze(-1)
+    # Apply structured pruning (channel-wise) to convolutional layers
+    for name, module in pruned_model.named_modules():
+        # Prune Linear layers by channels (structured pruning)
+        if isinstance(module, nn.Linear) and module.out_features > 1:
+            # Only prune if output dimension is > 1 to avoid errors
+            prune.ln_structured(module, name='weight', amount=amount, n=2, dim=0)
+            prune.remove(module, 'weight')  # Make pruning permanent
+            pruned_layers.append(name)
 
-            # Mark these heads as pruned
-            print(f"Pruned heads {head_nums_to_prune} in encoder layer {layer_idx}")
+        # Prune the attention weights (more targeted pruning for transformers)
+        # This requires identifying the specific attention matrices in your model
+        if 'query' in name or 'key' in name or 'value' in name:
+            if isinstance(module, nn.Linear):
+                prune.ln_structured(module, name='weight', amount=amount, n=2, dim=0)
+                prune.remove(module, 'weight')
+                pruned_layers.append(name)
 
-print(original_model.transformer_encoder.layers[0])
-# Get model dimensions from the original model
-input_dim = original_model.input_dim if hasattr(original_model, 'input_dim') else sample_input[0].shape[2]
-static_dim = original_model.static_dim if hasattr(original_model, 'static_dim') else sample_input[1].shape[1]
-d_model = original_model.enc_embedding.out_features if hasattr(original_model, 'enc_embedding') else 512
-n_heads = original_model.n_heads if hasattr(original_model, 'n_heads') else 8
-e_layers = original_model.e_layers if hasattr(original_model, 'e_layers') else 3
-d_ff = original_model.transformer_encoder.layers[0].linear1.out_features if hasattr(original_model, 'transformer_encoder') else 256
-print(f"Input Dimensions: {input_dim}, Static Dimensions: {static_dim}, d_model: {d_model}, n_heads: {n_heads}, e_layers: {e_layers}, d_ff: {d_ff}")
-# Create prunable model with same dimensions as original
-pruned_model = PrunableInformer(
-    input_dim=input_dim,
-    static_dim=static_dim,
-    d_model=d_model,
-    n_heads=n_heads,
-    e_layers=e_layers,
-    d_ff=d_ff,
-    dropout=0.1,
-    activation='gelu'
-).to(device)
+    print(f"Applied structured pruning to {len(pruned_layers)} layers with amount={amount}")
 
-# Load original weights (copy parameters from original model)
-pruned_model.load_state_dict(original_model.state_dict())
+    return pruned_model
 
-# Prune less important attention heads (for example, heads 0, 3, and 6)
-pruned_model.prune_heads([0, 3, 6])
+# Define a function to measure sparsity
+def measure_sparsity(model):
+    """Measure the sparsity of a model (percentage of zeros)"""
+    total_params = 0
+    zero_params = 0
 
-# Fine-tune the pruned model
-optimizer = torch.optim.Adam(pruned_model.parameters(), lr=LEARNING_RATE)
-# Define loss function
-criterion = nn.MSELoss()
+    for param in model.parameters():
+        if param.requires_grad:
+            total_params += param.numel()
+            zero_params += (param == 0).sum().item()
 
-# Simple training function since we can't use the project's train_model function directly
-def simple_train(model, train_loader, val_loader, optimizer, criterion, epochs=2, debug_mode=False):
-    """Simplified training function for fine-tuning."""
-    model.train()
-    for epoch in range(epochs):
-        epoch_loss = 0.0
-        num_batches = 0
+    sparsity = 100.0 * zero_params / total_params if total_params > 0 else 0
+    return sparsity
 
-        # Training loop
-        for batch_idx, batch in enumerate(train_loader):
-            # In debug mode, only process 10 batches per epoch
-            if debug_mode and batch_idx >= 10:
-                print(f"Debug mode: Stopping after 10 batches")
-                break
+# Print sparsity of original model
+print(f"Original model sparsity: {measure_sparsity(original_model):.2f}%")
 
-            temporal_features = batch['temporal_features'].to(device)
-            static_features = batch['static_features'].to(device)
-            targets = batch['target'].to(device)
+# Apply different levels of pruning and evaluate
+pruning_levels = [0.1, 0.3, 0.5]
+pruning_results = []
 
-            optimizer.zero_grad()
-            outputs = model(temporal_features, static_features)
-            loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.step()
+for prune_amount in pruning_levels:
+    print(f"\nApplying {prune_amount:.1%} structured pruning...")
 
-            epoch_loss += loss.item()
-            num_batches += 1
+    # Apply pruning
+    pruned_model = apply_structured_pruning(original_model, amount=prune_amount)
+    pruned_model = pruned_model.to(device)
 
-        epoch_loss /= num_batches
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {epoch_loss:.4f}")
+    # Measure sparsity
+    sparsity = measure_sparsity(pruned_model)
+    print(f"Pruned model sparsity: {sparsity:.2f}%")
 
-    return model
+    # Evaluate pruned model
+    pruned_metrics = print_model_report(f"{model_name}_pruned_{prune_amount:.1f}",
+                                        pruned_model, test_loader, scalers, device=device)
 
-# Fine-tune pruned model
-pruned_model = simple_train(pruned_model, train_loader, val_loader, optimizer, criterion,
-                            epochs=EPOCHS, debug_mode=DEBUG_MODE)
+    # Store results
+    pruning_results.append({
+        'prune_amount': prune_amount,
+        'sparsity': sparsity,
+        'metrics': pruned_metrics
+    })
 
-# Evaluate pruned model
-pruned_metrics = print_model_report('Pruned Informer', pruned_model, test_loader, scalers)
+# Compare the models with different pruning levels
+print("\n===== Structured Pruning Results =====")
+print(f"{'Model':<30}{'Size (MB)':<12}{'Sparsity':<10}{'Latency(ms)':<15}{'MAE':<10}")
+print('-'*77)
+print(f"{'Original Model':<30}{original_metrics['size']:<12.2f}{measure_sparsity(original_model):<10.2f}{original_metrics['inference_time']*1000:<15.2f}{original_metrics['metrics']['mae']:<10.4f}")
 
-# Save the pruned model
-os.makedirs('checkpoints', exist_ok=True)
-save_model(
-    pruned_model,
-    'checkpoints/informer_pruned.pth',
-    metadata={'pruned_heads': [0, 3, 6]}
-)
+for result in pruning_results:
+    metrics = result['metrics']
+    name = f"Pruned ({result['prune_amount']:.1%})"
+    print(f"{name:<30}{metrics['size']:<12.2f}{result['sparsity']:<10.2f}{metrics['inference_time']*1000:<15.2f}{metrics['metrics']['mae']:<10.4f}")
+
+# Find the best pruned model based on inference time and accuracy tradeoff
+# Simple metric: normalize both factors and sum
+best_model_idx = 0
+best_score = -float('inf')
+
+for i, result in enumerate(pruning_results):
+    # Lower MAE is better, higher speed improvement is better
+    mae_score = original_metrics['metrics']['mae'] / result['metrics']['metrics']['mae']
+    speed_score = original_metrics['inference_time'] / result['metrics']['inference_time']
+
+    # Combined score (you could adjust weights as needed)
+    score = mae_score + speed_score
+
+    if score > best_score:
+        best_score = score
+        best_model_idx = i
+
+# Use the best pruned model for overall comparison
+best_pruned_model = pruning_results[best_model_idx]['metrics']
+print(f"\nBest pruning level: {pruning_results[best_model_idx]['prune_amount']:.1%}")
+
+# Add the best pruned model to the overall comparison
+all_models = [original_metrics, best_pruned_model]
 
 # %% [markdown]
 # ## Technique 3: Knowledge Distillation
 #
-# Knowledge distillation trains a smaller model (student) to mimic the behavior of the larger model (teacher).
+# Knowledge distillation trains a smaller "student" model to mimic the behavior of the larger "teacher" model,
+# preserving most of the accuracy while using fewer parameters.
 
 # %%
+print("\n===== Technique 3: Knowledge Distillation =====")
+
+# Define distillation loss - combines task loss with matching teacher outputs
 class DistillationLoss(nn.Module):
-    """
-    Knowledge distillation loss combining MSE loss with KL divergence.
-    """
     def __init__(self, alpha=0.5, temperature=2.0):
+        """
+        Args:
+            alpha: Weight for the distillation loss (0-1)
+            temperature: Temperature for softening the teacher's predictions
+        """
         super().__init__()
-        self.alpha = alpha  # Weight for distillation loss
-        self.temperature = temperature  # Temperature for softening probability distributions
+        self.alpha = alpha
+        self.temperature = temperature
         self.mse_loss = nn.MSELoss()
 
     def forward(self, student_outputs, teacher_outputs, targets):
-        # Standard MSE loss against ground truth
-        student_loss = self.mse_loss(student_outputs, targets)
+        # Task loss - direct prediction loss
+        task_loss = self.mse_loss(student_outputs, targets)
 
-        # Distillation loss (MSE between student and teacher outputs)
-        distillation_loss = self.mse_loss(
-            student_outputs / self.temperature,
-            teacher_outputs.detach() / self.temperature
-        )
+        # Distillation loss - match the teacher's predictions
+        # For regression task, we use MSE between student and teacher outputs
+        distill_loss = self.mse_loss(student_outputs, teacher_outputs)
 
-        # Combine the losses
-        loss = (1 - self.alpha) * student_loss + self.alpha * distillation_loss
-        return loss
+        # Combined loss
+        loss = (1 - self.alpha) * task_loss + self.alpha * distill_loss
 
-# Create a smaller student model with fewer parameters
-student_model = InformerModel(
-    input_dim=input_dim,
-    static_dim=static_dim,
-    d_model=STUDENT_D_MODEL,  # Smaller model dimension
-    n_heads=STUDENT_N_HEADS,  # Fewer attention heads
-    e_layers=STUDENT_E_LAYERS, # Fewer encoder layers
-    d_ff=STUDENT_D_MODEL * 2,  # Smaller feed-forward dimension
-    dropout=0.1,
-    activation='gelu'
-).to(device)
+        return loss, task_loss, distill_loss
 
-# Use the original model as teacher
-teacher_model = original_model.eval()
+# Create smaller student model based on the original model architecture
+def create_student_model(original_model, d_model=STUDENT_D_MODEL, n_heads=STUDENT_N_HEADS, e_layers=STUDENT_E_LAYERS, d_ff=STUDENT_D_FF):
+    """
+    Creates a smaller student model with reduced parameters
+    """
+    print(f"Creating student model with d_model={d_model}, n_heads={n_heads}, e_layers={e_layers}")
 
-# Define distillation loss
-distillation_criterion = DistillationLoss(alpha=0.7, temperature=2.0)
+    # Use the TransformerModel with smaller parameters
+    return TransformerModel(
+        input_dim=original_model.input_dim,
+        static_dim=original_model.static_dim,
+        d_model=d_model,
+        n_heads=n_heads,
+        e_layers=e_layers,
+        d_ff=d_ff,
+        dropout=0.1,
+    )
 
-# Train the student model with knowledge distillation
-def train_with_distillation(student, teacher, train_loader, criterion, optimizer, epochs=5, debug_mode=False):
-    """Train student model with knowledge distillation from teacher."""
-    student.train()
-    teacher.eval()  # Teacher always in eval mode
+# Training function for distillation
+def train_with_distillation(teacher_model, student_model, train_loader, val_loader,
+                          criterion, optimizer, scheduler=None,
+                          epochs=EPOCHS, device=device, patience=PATIENCE,
+                          debug_mode=DEBUG_MODE):
+    """
+    Train the student model with knowledge distillation from the teacher
+    """
+    # Ensure models are on the correct device
+    teacher_model = teacher_model.to(device)
+    student_model = student_model.to(device)
 
-    train_losses = []
+    teacher_model.eval()  # Teacher model is only used for inference
+    student_model.train()
+
+    best_val_loss = float('inf')
+    patience_counter = 0
+    best_model_state = None
 
     for epoch in range(epochs):
-        epoch_loss = 0.0
-        num_batches = 0
+        # Training phase
+        student_model.train()
+        train_losses = []
+        task_losses = []
+        distill_losses = []
 
-        for batch_idx, batch in enumerate(train_loader):
-            # In debug mode, only process 10 batches per epoch
-            if debug_mode and batch_idx >= 10:
-                print(f"Debug mode: Stopping after 10 batches")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
+        for i, batch in enumerate(pbar):
+            if debug_mode and i >= 10:
                 break
 
+            # Move data to device
             temporal_features = batch['temporal_features'].to(device)
             static_features = batch['static_features'].to(device)
             targets = batch['target'].to(device)
 
-            # Forward pass with teacher model (no grad)
+            # Forward pass through teacher model (no grad needed)
             with torch.no_grad():
-                teacher_outputs = teacher(temporal_features, static_features)
+                teacher_outputs = teacher_model(temporal_features, static_features)
 
-            # Forward pass with student model
+            # Forward pass through student model
             optimizer.zero_grad()
-            student_outputs = student(temporal_features, static_features)
+            student_outputs = student_model(temporal_features, static_features)
 
-            # Calculate distillation loss
-            loss = criterion(student_outputs, teacher_outputs, targets)
+            # Calculate loss
+            loss, task_loss, distill_loss = criterion(student_outputs, teacher_outputs, targets)
+
+            # Backward pass and optimize
             loss.backward()
             optimizer.step()
 
-            epoch_loss += loss.item()
-            num_batches += 1
+            # Log losses
+            train_losses.append(loss.item())
+            task_losses.append(task_loss.item())
+            distill_losses.append(distill_loss.item())
 
-        epoch_loss /= num_batches
-        train_losses.append(epoch_loss)
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {epoch_loss:.4f}")
+            # Update progress bar
+            pbar.set_postfix({
+                'loss': f"{loss.item():.4f}",
+                'task_loss': f"{task_loss.item():.4f}",
+                'distill_loss': f"{distill_loss.item():.4f}"
+            })
 
-    return student
+        # Validation phase
+        student_model.eval()
+        val_losses = []
+
+        with torch.no_grad():
+            for i, batch in enumerate(tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]")):
+                if debug_mode and i >= 10:
+                    break
+
+                # Move data to device
+                temporal_features = batch['temporal_features'].to(device)
+                static_features = batch['static_features'].to(device)
+                targets = batch['target'].to(device)
+
+                # Forward pass
+                teacher_outputs = teacher_model(temporal_features, static_features)
+                student_outputs = student_model(temporal_features, static_features)
+
+                # Calculate loss
+                loss, _, _ = criterion(student_outputs, teacher_outputs, targets)
+                val_losses.append(loss.item())
+
+        # Calculate average losses
+        avg_train_loss = sum(train_losses) / len(train_losses) if train_losses else 0
+        avg_task_loss = sum(task_losses) / len(task_losses) if task_losses else 0
+        avg_distill_loss = sum(distill_losses) / len(distill_losses) if distill_losses else 0
+        avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
+
+        print(f"Epoch {epoch+1}/{epochs} - "
+              f"Train Loss: {avg_train_loss:.4f} "
+              f"(Task: {avg_task_loss:.4f}, Distill: {avg_distill_loss:.4f}) - "
+              f"Val Loss: {avg_val_loss:.4f}")
+
+        # Learning rate scheduler step
+        if scheduler is not None:
+            scheduler.step(avg_val_loss)
+
+        # Early stopping
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            # Save best model state
+            best_model_state = copy.deepcopy(student_model.state_dict())
+            print(f"Improved validation loss! New best: {best_val_loss:.4f}")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping after {epoch+1} epochs!")
+                break
+
+    # Load best model state
+    if best_model_state is not None:
+        student_model.load_state_dict(best_model_state)
+
+    return student_model, best_val_loss
+
+# Create student model
+student_model = create_student_model(original_model)
+student_model = student_model.to(device)
+
+# Ensure both models are on the same device
+original_model = original_model.to(device)
+
+# Print model info
+print("\nTeacher model:")
+print_model_info(original_model, temporal_shape=sample_input[0].shape,
+                static_shape=sample_input[1].shape)
+print("\nStudent model:")
+print_model_info(student_model, temporal_shape=sample_input[0].shape,
+                static_shape=sample_input[1].shape)
+
+# Configure distillation training
+distillation_loss = DistillationLoss(alpha=0.5, temperature=2.0)
+optimizer = torch.optim.Adam(student_model.parameters(), lr=LEARNING_RATE)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.5, patience=2, verbose=True
+)
 
 # Train student model with distillation
-optimizer = torch.optim.Adam(student_model.parameters(), lr=LEARNING_RATE)
-student_model = train_with_distillation(
-    student_model,
-    teacher_model,
-    train_loader,
-    distillation_criterion,
-    optimizer,
+print("\nTraining student model with knowledge distillation...")
+
+# Train with distillation
+student_model, best_val_loss = train_with_distillation(
+    teacher_model=original_model,
+    student_model=student_model,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    criterion=distillation_loss,
+    optimizer=optimizer,
+    scheduler=scheduler,
     epochs=EPOCHS,
+    patience=PATIENCE,
     debug_mode=DEBUG_MODE
 )
 
-# Save the student model
-save_model(
-    student_model,
-    'checkpoints/informer_student.pth',
-    metadata={
-        'student_d_model': STUDENT_D_MODEL,
-        'student_n_heads': STUDENT_N_HEADS,
-        'student_e_layers': STUDENT_E_LAYERS,
-        'distillation': True
-    }
-)
+# Save the trained student model
+student_model_path = f"checkpoints/{base_checkpoint_name}_student.pt"
+# Get the current config
+CONFIG = {}
+cur_globals = globals().copy()
+for x in cur_globals:
+    # Only get the variables that are uppercase and not digits
+    if x.upper() == x and not x.startswith('_') and not x == "CONFIG":
+        CONFIG[x] = cur_globals[x]
+metadata = {
+    "model_name": model_name,
+}
+save_model(student_model, student_model_path, temporal_features=SELECTED_FEATURES, static_features=STATIC_FEATURES,
+           target_field=TARGET_VARIABLE, config=CONFIG, time_feature_keys=TIME_FEATURES)
+print(f"Saved student model to {student_model_path}")
 
 # Evaluate student model
-student_metrics = print_model_report('Student Informer', student_model, test_loader, scalers)
+student_metrics = print_model_report(f"{model_name}_student", student_model, test_loader, scalers, device=device)
 
-# %% [markdown]
-# ## Combining Techniques: Quantized Student Model
-#
-# Let's combine quantization with knowledge distillation for maximum efficiency.
+# Compare original and student models
+print("\n===== Knowledge Distillation Results =====")
+print(f"{'Model':<30}{'Size (MB)':<12}{'Latency(ms)':<15}{'MAE':<10}")
+print('-'*67)
+print(f"{'Original Model':<30}{original_metrics['size']:<12.2f}{original_metrics['inference_time']*1000:<15.2f}{original_metrics['metrics']['mae']:<10.4f}")
+print(f"{'Student Model':<30}{student_metrics['size']:<12.2f}{student_metrics['inference_time']*1000:<15.2f}{student_metrics['metrics']['mae']:<10.4f}")
 
-# %%
-# Apply quantization to the student model
-quantizable_student = QuantizableInformer(student_model).to(device)
-quantized_student = quantize_dynamic(
-    quantizable_student,
-    {nn.Linear},
-    dtype=torch.qint8
+# Calculate and display improvement percentages
+size_reduction = (original_metrics['size'] - student_metrics['size']) / original_metrics['size'] * 100
+speed_improvement = (original_metrics['inference_time'] - student_metrics['inference_time']) / original_metrics['inference_time'] * 100
+accuracy_change = (original_metrics['metrics']['mae'] - student_metrics['metrics']['mae']) / original_metrics['metrics']['mae'] * 100
+
+print(f"\nSize reduction: {size_reduction:.2f}%")
+print(f"Inference speed improvement: {speed_improvement:.2f}%")
+print(f"Accuracy change: {accuracy_change:.2f}%")
+
+# Visualize predictions of teacher and student models
+print("\nGenerating predictions visualization for teacher and student models...")
+viz_fig = plot_predictions_over_time(
+    models=[original_model, student_model],
+    model_names=["Teacher", "Student"],
+    data_loader=test_loader,
+    target_scaler=target_scaler,
+    num_samples=72,
+    start_idx=40,
+    device=device
 )
 
-# Evaluate the quantized student model
-quantized_student_metrics = print_model_report('Quantized Student', quantized_student, test_loader, scalers)
+plt.show()
+
+# Add student model to overall comparison
+all_models = [original_metrics, best_pruned_model, student_metrics]
 
 # %% [markdown]
-# ## Results Comparison
-
+# ### Compare teacher and student model predictions
 # %%
-# Compile all results
-all_models = [
-    original_metrics,
-    cpu_quantized_metrics,  # Use the CPU quantized model metrics
-    pruned_metrics,
-    student_metrics,
-    quantized_student_metrics
-]
+# Compare model
+from utils.plot_utils import compare_models
 
-# Extract data for plotting
-names = [model['name'] for model in all_models]
-sizes = [model['size'] for model in all_models]
-times = [model['inference_time'] * 1000 for model in all_models]  # Convert to ms
-losses = [model['test_loss'] for model in all_models]
 
-# Create bar plots
-fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+# Create a dictionary of model metrics
+model_metrics = {
+    'Original Model': original_metrics['metrics'],
+    'Pruned Model': best_pruned_model['metrics'],
+    'Student Model': student_metrics['metrics']
+}
+# Drop the 'y_pred' and 'y_true' keys from the model metrics
+for model in model_metrics:
+    model_metrics[model].pop('y_pred', None)
+    model_metrics[model].pop('y_true', None)
+    model_metrics[model].pop('nighttime_mask', None)
 
-# Model size comparison
-axes[0].bar(names, sizes, color='skyblue')
-axes[0].set_title('Model Size (MB)')
-axes[0].set_ylabel('Size (MB)')
-axes[0].tick_params(axis='x', rotation=45)
+# Save model metrics to a json file for later use
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+json_file_path = f'plots/compression_model_metrics_{timestamp}.json'
+# Fix TypeError: Object of type float32 is not JSON serializable
+for model in model_metrics:
+    for key, value in model_metrics[model].items():
+        if isinstance(value, np.float32):
+            model_metrics[model][key] = float(value)
+with open(json_file_path, 'w') as f:
+    json.dump(model_metrics, f)
 
-# Inference time comparison
-axes[1].bar(names, times, color='lightgreen')
-axes[1].set_title('Inference Time (ms)')
-axes[1].set_ylabel('Time (ms)')
-axes[1].tick_params(axis='x', rotation=45)
+# Compare model performance on test set
+fig = compare_models(model_metrics, dataset_name='Test')
 
-# Test loss comparison
-axes[2].bar(names, losses, color='salmon')
-axes[2].set_title('Test Loss (MSE)')
-axes[2].set_ylabel('Loss')
-axes[2].tick_params(axis='x', rotation=45)
-
-plt.tight_layout()
-plt.savefig('model_efficiency_comparison.png', dpi=300)
-plt.show()
 
 # %% [markdown]
 # ## Summary of Efficiency Improvements
