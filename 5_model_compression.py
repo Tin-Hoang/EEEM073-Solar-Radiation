@@ -13,6 +13,11 @@
 # ## Setup and Imports
 
 # %%
+# Load autoreload extension
+# %load_ext autoreload
+# Set autoreload to mode 2
+# %autoreload 2
+
 import os
 import time
 import torch
@@ -24,13 +29,19 @@ from torch.quantization import quantize_dynamic, QuantStub, DeQuantStub
 from torch.utils.data import DataLoader
 from typing import Dict, List, Tuple, Optional, Union
 import copy
+import onnx
+from onnxruntime.quantization import quantize_dynamic, QuantType, quantize_static, QuantFormat, CalibrationDataReader
+import onnxruntime as ort
+from tqdm import tqdm
+from sklearn.metrics import mean_absolute_error
 
 # Import project utilities
 from utils.model_utils import load_model, save_model, print_model_info
 from utils.data_persistence import load_normalized_data, load_scalers
+from utils.plot_utils import plot_predictions_over_time
 from utils.timeseriesdataset import TimeSeriesDataset
 from utils.training_utils import train_model, evaluate_model
-from models.informer import InformerModel
+from models.informer_mimick import InformerModel
 
 # For reproducibility
 torch.manual_seed(42)
@@ -45,11 +56,13 @@ print(f"Using device: {device}")
 # Model efficiency experiment configuration
 
 # Data settings
-TRAIN_DATA_PATH = "data/processed/train_normalized_20250430_145157.h5"
-VAL_DATA_PATH = "data/processed/val_normalized_20250430_145205.h5"
-TEST_DATA_PATH = "data/processed/test_normalized_20250430_145205.h5"
+TRAIN_PREPROCESSED_DATA_PATH = "data/processed/train_normalized_20250430_145157.h5"
+VAL_PREPROCESSED_DATA_PATH = "data/processed/val_normalized_20250430_145205.h5"
+TEST_PREPROCESSED_DATA_PATH = "data/processed/test_normalized_20250430_145205.h5"
 SCALER_PATH = "data/processed/scalers_20250430_145206.pkl"
-PRETRAINED_MODEL_PATH = "checkpoints/Informer_best_20250430_214758.pt"
+# Choose the model checkpoint from the previous experiment
+# PRETRAINED_MODEL_PATH = "checkpoints/MLP_best_20250504_052621.pt"
+PRETRAINED_MODEL_PATH = "checkpoints/Transformer_best_20250503_232818.pt"
 
 # Dataset settings
 LOOKBACK = 24
@@ -65,8 +78,8 @@ STATIC_FEATURES = ['latitude', 'longitude', 'elevation']
 QUANTIZATION_DTYPE = torch.qint8
 
 # Distillation Training settings
-BATCH_SIZE = 64
-NUM_WORKERS = 4
+BATCH_SIZE = 2**10
+NUM_WORKERS = 16
 EPOCHS = 2
 LEARNING_RATE = 0.0005
 PATIENCE = 5
@@ -91,7 +104,7 @@ def get_model_size(model):
     torch_model_size_mb = torch_model_size / (1024 * 1024)
     return torch_model_size_mb
 
-def print_model_report(model_name, model, test_loader, scalers):
+def print_model_report(model_name, model, test_loader, scalers, device=device):
     """Print a comprehensive report about the model."""
     model_size = get_model_size(model)
 
@@ -102,6 +115,7 @@ def print_model_report(model_name, model, test_loader, scalers):
         target_scaler=scalers.get('ghi_scaler', None),
         model_name=model_name,
         log_to_wandb=False,
+        device=device,
         debug_mode=DEBUG_MODE
     )
     # Get inference time from the evaluation metrics
@@ -134,137 +148,34 @@ def print_model_report(model_name, model, test_loader, scalers):
 # Use the project's data loading utilities to load the preprocessed data.
 
 # %%
-def load_data(config):
-    """
-    Load and prepare data for training and evaluation using project utilities.
-    Returns train_loader, val_loader, test_loader, and sample_input.
-    """
-    try:
-        # Load scalers
-        scalers = load_scalers(config["scaler_path"])
+# Load scalers
+from utils.timeseriesdataset import TimeSeriesDataset
 
-        # Create datasets
-        train_dataset = TimeSeriesDataset(
-            config["train_data_path"],
-            lookback=config["lookback"],
-            target_field=config["target_variable"],
-            selected_features=config["selected_features"],
-            include_target_history=False,
-            static_features=config["static_features"]
-        )
+# Create datasets
+train_dataset = TimeSeriesDataset(TRAIN_PREPROCESSED_DATA_PATH, lookback=LOOKBACK, target_field=TARGET_VARIABLE,
+                                 selected_features=SELECTED_FEATURES, include_target_history=False,
+                                 static_features=STATIC_FEATURES)
+val_dataset = TimeSeriesDataset(VAL_PREPROCESSED_DATA_PATH, lookback=LOOKBACK, target_field=TARGET_VARIABLE,
+                               selected_features=SELECTED_FEATURES, include_target_history=False,
+                               static_features=STATIC_FEATURES)
+test_dataset = TimeSeriesDataset(TEST_PREPROCESSED_DATA_PATH, lookback=LOOKBACK, target_field=TARGET_VARIABLE,
+                                selected_features=SELECTED_FEATURES, include_target_history=False,
+                                static_features=STATIC_FEATURES)
 
-        val_dataset = TimeSeriesDataset(
-            config["val_data_path"],
-            lookback=config["lookback"],
-            target_field=config["target_variable"],
-            selected_features=config["selected_features"],
-            include_target_history=False,
-            static_features=config["static_features"]
-        )
+# Create data loaders
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
+test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
 
-        test_dataset = TimeSeriesDataset(
-            config["test_data_path"],
-            lookback=config["lookback"],
-            target_field=config["target_variable"],
-            selected_features=config["selected_features"],
-            include_target_history=False,
-            static_features=config["static_features"]
-        )
+scalers = load_scalers(SCALER_PATH)
 
-        # Create data loaders
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=config["batch_size"],
-            shuffle=True,
-            num_workers=config["num_workers"]
-        )
+# Get sample input for inference time measurement
+sample_batch = next(iter(test_loader))
+sample_temporal = sample_batch['temporal_features'][0:1].to(device)
+sample_static = sample_batch['static_features'][0:1].to(device)
+sample_input = (sample_temporal, sample_static)
 
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=config["batch_size"],
-            shuffle=False,
-            num_workers=config["num_workers"]
-        )
-
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=config["batch_size"],
-            shuffle=False,
-            num_workers=config["num_workers"]
-        )
-
-        # Get sample input for inference time measurement
-        sample_batch = next(iter(test_loader))
-        sample_temporal = sample_batch['temporal_features'][0:1].to(device)
-        sample_static = sample_batch['static_features'][0:1].to(device)
-        sample_input = (sample_temporal, sample_static)
-
-        print("Data loading successful.")
-        return train_loader, val_loader, test_loader, sample_input, scalers
-
-    except Exception as e:
-        print(f"Error loading data: {e}")
-        print("Creating dummy data for demonstration purposes.")
-
-        # Create dummy data
-        batch_size = 32
-        seq_len = config["lookback"]
-        input_dim = len(config["selected_features"])
-        static_dim = len(config["static_features"])
-
-        # Create dummy tensors
-        dummy_temporal = torch.randn(batch_size, seq_len, input_dim)
-        dummy_static = torch.randn(batch_size, static_dim)
-        dummy_target = torch.randn(batch_size, 1)
-
-        # Create dummy batches
-        dummy_batch = {
-            'temporal_features': dummy_temporal,
-            'static_features': dummy_static,
-            'target': dummy_target
-        }
-
-        # Create simple data loaders that yield the same batch
-        train_loader = [dummy_batch for _ in range(10)]
-        val_loader = [dummy_batch for _ in range(5)]
-        test_loader = [dummy_batch for _ in range(5)]
-
-        # Sample input for inference time measurement
-        sample_input = (dummy_temporal[0:1].to(device), dummy_static[0:1].to(device))
-
-        # Dummy scalers
-        class DummyScaler:
-            def transform(self, x): return x
-            def inverse_transform(self, x): return x
-
-        scalers = {'target': DummyScaler()}
-
-        return train_loader, val_loader, test_loader, sample_input, scalers
-
-# Create config dictionary for backwards compatibility
-config = {
-    "train_data_path": TRAIN_DATA_PATH,
-    "val_data_path": VAL_DATA_PATH,
-    "test_data_path": TEST_DATA_PATH,
-    "scaler_path": SCALER_PATH,
-    "pretrained_model_path": PRETRAINED_MODEL_PATH,
-    "lookback": LOOKBACK,
-    "target_variable": TARGET_VARIABLE,
-    "selected_features": SELECTED_FEATURES,
-    "static_features": STATIC_FEATURES,
-    "batch_size": BATCH_SIZE,
-    "num_workers": NUM_WORKERS,
-    "epochs": EPOCHS,
-    "learning_rate": LEARNING_RATE,
-    "patience": PATIENCE,
-    "debug_mode": DEBUG_MODE
-}
-
-# Load data
-train_loader, val_loader, test_loader, sample_input, scalers = load_data(config)
-
-# Define loss function
-criterion = nn.MSELoss()
+print("Data loading successful.")
 
 # %% [markdown]
 # ## Load Original Informer Model
@@ -275,54 +186,315 @@ criterion = nn.MSELoss()
 
 print(f"Loading model from {PRETRAINED_MODEL_PATH}")
 original_model, metadata = load_model(PRETRAINED_MODEL_PATH, device=device)
-
+model_name = metadata['model_name']
 # Print model information
 print_model_info(original_model,
                 temporal_shape=sample_input[0].shape,
                 static_shape=sample_input[1].shape)
 
 # Evaluate original model
-original_metrics = print_model_report('Original Informer', original_model, test_loader, scalers)
+original_metrics = print_model_report(model_name, original_model, test_loader, scalers, device=device)
+
+# %% [markdown]
+# ### Visualize Model Predictions Over Time
+
+# %%
+# Define target scaler from the data_metadata
+target_scaler = scalers.get(f'{TARGET_VARIABLE}_scaler')
+if target_scaler is None:
+    print(f"Warning: No scaler found for target field '{TARGET_VARIABLE}'. Visualization may show scaled values.")
+
+# Visualize the loaded model's predictions
+print("Generating predictions visualization...")
+original_model.eval()  # Set model to evaluation mode
+
+# Create the visualization using the imported function
+viz_fig = plot_predictions_over_time(
+    models=[original_model],
+    model_names=[model_name],
+    data_loader=test_loader,
+    target_scaler=target_scaler,
+    num_samples=72,  # Adjust as needed
+    start_idx=40,
+    device=device       # Adjust as needed
+)
+
+# Display the plot if in a notebook environment
+plt.show()
 
 # %% [markdown]
 # ## Technique 1: Quantization
 #
 # Quantization reduces model precision from float32 to int8 to decrease model size and improve inference speed.
+#
+# Quantization is done on the CPU.
+# %% [markdown]
+# ## Technique 1a: ONNX Quantization (CPU)
+#
+# This section demonstrates exporting the PyTorch model to ONNX format and applying ONNX dynamic quantization for model efficiency.
 
 # %%
-class QuantizableInformer(nn.Module):
-    """Wrapper for the Informer model to make it quantizable."""
-    def __init__(self, informer_model):
-        super().__init__()
-        self.informer = informer_model
-        # Quantize the model
-        self.quantized_model = torch.quantization.quantize_dynamic(
-            self.informer,
-            {nn.Linear},  # Quantize only linear layers
-            dtype=QUANTIZATION_DTYPE
-        )
-        # DEBUG: Use the original model for forward pass
-        self.quantized_model = self.informer
+# Define an ONNX wrapper to preserve batch dimension in the output
+class OnnxModelWrapper(nn.Module):
+    def __init__(self, model):
+        super(OnnxModelWrapper, self).__init__()
+        self.model = model
 
     def forward(self, temporal_features, static_features):
-        # Standard forward pass without explicit quantization/dequantization
-        return self.quantized_model(temporal_features, static_features)
+        outputs = self.model(temporal_features, static_features)
+        return outputs
 
-# Fix by using a simpler quantization approach
-print("Applying quantization to model...")
-quantized_model = QuantizableInformer(original_model).to(device)
+# Define device (use CPU for 'fbgemm')
+cpu_device = torch.device('cpu')
 
-# Evaluate the quantized model
-quantized_metrics = print_model_report('Quantized Informer', quantized_model, test_loader, scalers)
+# Prepare wrapper and CPU sample input
+wrapper = OnnxModelWrapper(original_model).eval().to(cpu_device)
+sample_input_cpu = (sample_input[0].cpu(), sample_input[1].cpu())
 
-print(f"=== Original vs Quantized ===")
-print(f"Original Model Size: {original_metrics['size']:.2f} MB")
-print(f"Quantized Model Size: {quantized_metrics['size']:.2f} MB")
-print(f"Original Inference Time: {original_metrics['inference_time']*1000:.2f} ms")
-print(f"Quantized Inference Time: {quantized_metrics['inference_time']*1000:.2f} ms")
-print(f"Original Test Loss: {original_metrics['test_loss']:.4f}")
-print(f"Quantized Test Loss: {quantized_metrics['test_loss']:.4f}")
+# Export the original model to ONNX
+onnx_model_path = f"checkpoints/{model_name}_original.onnx"
+print(f"Exporting original model to ONNX at {onnx_model_path}")
+torch.onnx.export(
+    wrapper,
+    sample_input_cpu,
+    onnx_model_path,
+    input_names=["temporal_features", "static_features"],
+    output_names=["output"],
+    opset_version=20,
+    dynamic_axes={
+        "temporal_features": {0: "batch"},
+        "static_features": {0: "batch"},
+        "output": {0: "batch"},
+    },
+)
+# File size before quantization
+orig_onnx_size = os.path.getsize(onnx_model_path) / (1024 * 1024)
+print(f"Original ONNX model size: {orig_onnx_size:.2f} MB")
 
+# Apply dynamic quantization with ONNX Runtime
+quantized_onnx_model_path = f"checkpoints/{model_name}_quantized.onnx"
+print(f"Quantizing ONNX model to {quantized_onnx_model_path}")
+quantize_dynamic(
+    model_input=onnx_model_path,
+    model_output=quantized_onnx_model_path,
+    weight_type=QuantType.QUInt8
+)
+
+# Run ONNX shape inference to populate output shape info and avoid mismatches
+print("Running ONNX shape inference for original and quantized models...")
+# Original ONNX model shape inference
+model_proto = onnx.load(onnx_model_path)
+inferred_model = onnx.shape_inference.infer_shapes(model_proto)
+onnx.save(inferred_model, onnx_model_path)
+# Quantized ONNX model shape inference
+model_q_proto = onnx.load(quantized_onnx_model_path)
+inferred_q_model = onnx.shape_inference.infer_shapes(model_q_proto)
+onnx.save(inferred_q_model, quantized_onnx_model_path)
+
+# Only annotate batch dimension if missing
+for model_path in [onnx_model_path, quantized_onnx_model_path]:
+    m = onnx.load(model_path)
+    for output in m.graph.output:
+        shape = output.type.tensor_type.shape
+        # Ensure dynamic batch dimension exists
+        if len(shape.dim) == 0:
+            dim0 = shape.dim.add()
+            dim0.dim_param = "batch"
+    onnx.save(m, model_path)
+
+quant_onnx_size = os.path.getsize(quantized_onnx_model_path) / (1024 * 1024)
+print(f"Quantized ONNX model size: {quant_onnx_size:.2f} MB")
+print()
+
+# Helper function to evaluate ONNX models over the full test set
+def evaluate_onnx_model(model_path):
+    sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+    input_name1 = sess.get_inputs()[0].name
+    input_name2 = sess.get_inputs()[1].name
+    # Warm-up on the first batch to initialize optimizations
+    first_batch = next(iter(test_loader))
+    warm_inp1 = first_batch['temporal_features'].numpy()
+    warm_inp2 = first_batch['static_features'].numpy()
+    for _ in range(5):
+        sess.run(None, {input_name1: warm_inp1, input_name2: warm_inp2})
+    # Measure inference time over all batches and collect outputs for MAE
+    total_time = 0.0
+    num_batches = 0
+    all_preds = []
+    all_targets = []
+    for batch in tqdm(test_loader, desc=f"ONNX inference ({os.path.basename(model_path)})"):
+        inp1 = batch['temporal_features'].numpy()
+        inp2 = batch['static_features'].numpy()
+        targets = batch['target'].numpy()
+        start = time.time()
+        outputs = sess.run(None, {input_name1: inp1, input_name2: inp2})[0]
+        elapsed = time.time() - start
+        total_time += elapsed
+        num_batches += 1
+        all_preds.append(outputs)
+        all_targets.append(targets)
+    avg_time = total_time / num_batches if num_batches > 0 else 0.0
+    # Concatenate and inverse-transform
+    preds = np.concatenate(all_preds, axis=0)
+    targets_arr = np.concatenate(all_targets, axis=0)
+    # Inverse scale if available
+    scaler = scalers.get(f"{TARGET_VARIABLE}_scaler", None)
+    if scaler is not None:
+        preds = scaler.inverse_transform(preds.reshape(-1, 1)).flatten()
+        targets_arr = scaler.inverse_transform(targets_arr.reshape(-1, 1)).flatten()
+    # Compute MAE via sklearn
+    mae_value = mean_absolute_error(targets_arr, preds)
+    print(f"Inference time for {os.path.basename(model_path)}: {avg_time*1000:.2f} ms per batch over {num_batches} batches")
+    print(f"MAE for {os.path.basename(model_path)}: {mae_value:.4f}")
+    return {'size': os.path.getsize(model_path)/(1024*1024), 'inference_time': avg_time, 'mae': mae_value}
+
+# Technique 1a: ONNX CPU Quantization Results
+print("\n===== Technique 1a: ONNX CPU Quantization Results =====")
+onnx_orig_metrics = evaluate_onnx_model(onnx_model_path)
+onnx_quant_metrics = evaluate_onnx_model(quantized_onnx_model_path)
+print(f"{'Model':<30}{'Size (MB)':<12}{'Latency(ms)':<15}{'MAE':<10}")
+print('-'*67)
+print(f"{'Original ONNX CPU':<30}{onnx_orig_metrics['size']:<12.2f}{onnx_orig_metrics['inference_time']*1000:<15.2f}{onnx_orig_metrics['mae']:<10.4f}")
+print(f"{'Quantized ONNX CPU':<30}{onnx_quant_metrics['size']:<12.2f}{onnx_quant_metrics['inference_time']*1000:<15.2f}{onnx_quant_metrics['mae']:<10.4f}")
+print()
+
+# %% [markdown]
+# ## Technique 1b: FP16 Quantization (Requires CUDA GPU)
+#
+# FP16 quantization is a technique that converts the model to FP16 precision to reduce memory usage and improve inference speed.
+# Require libraries:
+# - onnxconverter-common
+# - onnxruntime-gpu
+
+# %%
+# Helper function to evaluate ONNX models on GPU
+def evaluate_onnx_model_gpu(model_path, provider='CUDAExecutionProvider', fp16_mode=False):
+    # Configure session options to optimize for GPU
+    sess_options = ort.SessionOptions()
+    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+    # Silence provider assignment warnings - these are expected and normal
+    sess_options.add_session_config_entry("session.log.severity", "1")  # Set log level to WARNING (2) or ERROR (3)
+    sess_options.log_severity_level = 1  # Set to 1 for detailed logs
+
+    # Create inference session with CUDA provider
+    # Add CPU provider as a fallback because not all operations are supported on GPU
+    providers = [provider, 'CPUExecutionProvider']
+    session = ort.InferenceSession(
+        model_path,
+        providers=providers,
+        sess_options=sess_options
+    )
+
+    input_name1 = session.get_inputs()[0].name
+    input_name2 = session.get_inputs()[1].name
+
+    # Get a small batch for warm-up
+    first_batch = next(iter(test_loader))
+    warm_inp1 = first_batch['temporal_features'].numpy()
+    warm_inp2 = first_batch['static_features'].numpy()
+
+    # Convert inputs to FP16 if running in FP16 mode
+    if fp16_mode:
+        warm_inp1 = warm_inp1.astype(np.float16)
+        warm_inp2 = warm_inp2.astype(np.float16)
+
+    # Warm up with a few iterations
+    print(f"Warming up GPU ONNX model with provider: {provider}...")
+    for _ in range(10):  # More warm-up iterations for GPU
+        session.run(None, {input_name1: warm_inp1, input_name2: warm_inp2})
+
+    # Measure inference time and MAE
+    total_time = 0.0
+    num_batches = 0
+    all_preds = []
+    all_targets = []
+
+    for batch in tqdm(test_loader, desc=f"GPU ONNX inference ({os.path.basename(model_path)})"):
+        inp1 = batch['temporal_features'].numpy()
+        inp2 = batch['static_features'].numpy()
+        targets = batch['target'].numpy()
+
+        # Convert inputs to FP16 if running in FP16 mode
+        if fp16_mode:
+            inp1 = inp1.astype(np.float16)
+            inp2 = inp2.astype(np.float16)
+
+        # Sync CUDA before timing
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        start = time.time()
+        outputs = session.run(None, {input_name1: inp1, input_name2: inp2})[0]
+
+        # Sync CUDA after inference for accurate timing
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        elapsed = time.time() - start
+        total_time += elapsed
+        num_batches += 1
+
+        all_preds.append(outputs)
+        all_targets.append(targets)
+
+    avg_time = total_time / num_batches if num_batches > 0 else 0.0
+
+    # Calculate MAE (same as before)
+    preds = np.concatenate(all_preds, axis=0)
+    targets_arr = np.concatenate(all_targets, axis=0)
+
+    scaler = scalers.get(f"{TARGET_VARIABLE}_scaler", None)
+    if scaler is not None:
+        preds = scaler.inverse_transform(preds.reshape(-1, 1)).flatten()
+        targets_arr = scaler.inverse_transform(targets_arr.reshape(-1, 1)).flatten()
+
+    mae_value = mean_absolute_error(targets_arr, preds)
+
+    print(f"GPU Inference time for {os.path.basename(model_path)}: {avg_time*1000:.2f} ms per batch over {num_batches} batches")
+    print(f"MAE for {os.path.basename(model_path)}: {mae_value:.4f}")
+
+    return {
+        'size': os.path.getsize(model_path)/(1024*1024),
+        'inference_time': avg_time,
+        'mae': mae_value,
+        'provider': provider
+    }
+
+# Create an FP16 quantized model specifically for GPU
+quantized_fp16_path = f"checkpoints/{model_name}_quantized_fp16.onnx"
+print(f"Creating FP16 quantized model for GPU at {quantized_fp16_path}")
+
+# Use the convert_float_to_float16 utility from ONNX
+from onnxconverter_common import float16
+model_fp16 = float16.convert_float_to_float16(
+    model=model_proto,
+    min_positive_val=1e-7,
+    max_finite_val=1e4,
+)
+for output in model_fp16.graph.output:
+    shape = output.type.tensor_type.shape
+    # Ensure dynamic batch dimension exists
+    if len(shape.dim) == 0:
+        dim0 = shape.dim.add()
+        dim0.dim_param = "batch"
+onnx.save(model_fp16, quantized_fp16_path)
+
+# First evaluate the original model on GPU for baseline comparison
+print("\nEvaluating original (FP32) ONNX model on GPU...")
+onnx_gpu_metrics = evaluate_onnx_model_gpu(onnx_model_path, fp16_mode=False)
+
+# Evaluate the FP16 model on GPU
+print("\nEvaluating FP16 quantized model on GPU...")
+onnx_fp16_metrics = evaluate_onnx_model_gpu(quantized_fp16_path, fp16_mode=True)
+
+# Technique 1b: ONNX GPU Quantization Results (FP32 vs FP16 vs INT8)
+print("\n===== Technique 1b: ONNX GPU Quantization Results =====")
+print(f"{'Model':<30}{'Size (MB)':<12}{'Latency(ms)':<15}{'MAE':<10}")
+print('-'*67)
+print(f"{'Original ONNX GPU (FP32)':<30}{onnx_gpu_metrics['size']:<12.2f}{onnx_gpu_metrics['inference_time']*1000:<15.2f}{onnx_gpu_metrics['mae']:<10.4f}")
+print(f"{'FP16 ONNX GPU':<30}{onnx_fp16_metrics['size']:<12.2f}{onnx_fp16_metrics['inference_time']*1000:<15.2f}{onnx_fp16_metrics['mae']:<10.4f}")
+print()
 # %% [markdown]
 # ## Technique 2: Structured Pruning
 #
@@ -389,6 +561,8 @@ pruned_model.prune_heads([0, 3, 6])
 
 # Fine-tune the pruned model
 optimizer = torch.optim.Adam(pruned_model.parameters(), lr=LEARNING_RATE)
+# Define loss function
+criterion = nn.MSELoss()
 
 # Simple training function since we can't use the project's train_model function directly
 def simple_train(model, train_loader, val_loader, optimizer, criterion, epochs=2, debug_mode=False):
@@ -581,7 +755,7 @@ quantized_student_metrics = print_model_report('Quantized Student', quantized_st
 # Compile all results
 all_models = [
     original_metrics,
-    quantized_metrics,
+    cpu_quantized_metrics,  # Use the CPU quantized model metrics
     pruned_metrics,
     student_metrics,
     quantized_student_metrics
