@@ -1,0 +1,17 @@
+h5py==3.13.0
+matplotlib==3.10.1
+numpy==2.2.5
+onnx==1.17.0
+onnxconverter_common==1.14.0
+onnxruntime==1.21.1
+onnxruntime_gpu==1.21.1
+pandas==2.2.3
+pvlib==0.12.0
+pytorch_tsmixer==0.2.0
+pytz==2025.2
+scikit_learn==1.6.1
+seaborn==0.13.2
+shap==0.47.2
+torch==2.6.0
+torchinfo==1.8.0
+tqdm==4.67.1
