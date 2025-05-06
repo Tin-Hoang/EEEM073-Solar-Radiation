@@ -1,7 +1,7 @@
 # %% [markdown]
-# # Model Efficiency Experiment for Informer Model
+# # Model Efficiency Experiment (targeted: Transformer)
 #
-# This notebook implements various model efficiency techniques for the Informer model used in solar radiation forecasting:
+# This notebook implements various model efficiency techniques for the Transformer model used in solar radiation forecasting:
 #
 # 1. **Quantization**: Reducing model precision to decrease size and improve inference speed
 # 2. **Structured Pruning**: Removing less important components to reduce parameters
@@ -11,7 +11,7 @@
 
 
 # %% [markdown]
-# ## 0. Debug Mode
+# ## Debug Mode
 #
 # **IMPORTANT**: Set to True for code debugging mode and False for actual training.
 # In debug mode, the code will only run 10 batches/epoch for 10 epochs.
@@ -21,7 +21,7 @@
 DEBUG_MODE = True
 
 # %% [markdown]
-# ## Setup and Imports
+# ## 0. Setup and Load Trained Model
 
 # %%
 # Load autoreload extension
@@ -38,15 +38,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn
 import torch.nn.utils.prune as prune
-from torch.quantization import quantize_dynamic, QuantStub, DeQuantStub
 from torch.utils.data import DataLoader
-from typing import Dict, List, Tuple, Optional, Union
 import copy
-import onnx
-from onnxruntime.quantization import quantize_dynamic, QuantType, quantize_static, QuantFormat, CalibrationDataReader
-import onnxruntime as ort
 from tqdm import tqdm
 from sklearn.metrics import mean_absolute_error
+import wandb
 
 # Import project utilities
 from utils.model_utils import load_model, save_model, print_model_info
@@ -54,6 +50,7 @@ from utils.data_persistence import load_scalers
 from utils.plot_utils import plot_predictions_over_time
 from utils.timeseriesdataset import TimeSeriesDataset
 from utils.training_utils import evaluate_model
+from utils.wandb_utils import track_experiment, is_wandb_enabled
 from models.transformer import TransformerModel
 
 # For reproducibility
@@ -75,7 +72,7 @@ TEST_PREPROCESSED_DATA_PATH = "data/processed/test_normalized_20250430_145205.h5
 SCALER_PATH = "data/processed/scalers_20250430_145206.pkl"
 # Choose the model checkpoint from the previous experiment
 # PRETRAINED_MODEL_PATH = "checkpoints/MLP_best_20250504_052621.pt"
-PRETRAINED_MODEL_PATH = "checkpoints/Transformer_best_20250504_155841.pt"
+PRETRAINED_MODEL_PATH = "checkpoints/Transformer_best_20250505_060532.pt"
 
 # Dataset settings
 LOOKBACK = 24
@@ -88,25 +85,12 @@ SELECTED_FEATURES = [
 STATIC_FEATURES = ['latitude', 'longitude', 'elevation']
 TIME_FEATURES = ['hour_sin', 'hour_cos', 'day_sin', 'day_cos',
             'month_sin', 'month_cos', 'dow_sin', 'dow_cos']
-# Quantization settings
-QUANTIZATION_DTYPE = torch.qint8
-
-# Distillation Training settings
-PATIENCE = 5  # Early stopping patience
-LR = 0.0001
 if DEBUG_MODE:
     BATCH_SIZE = 2**10
     NUM_WORKERS = 4
-    EPOCHS = 10
 else:
     BATCH_SIZE = 2**13
     NUM_WORKERS = 16
-    EPOCHS = 30
-# Student model settings (should be lower than the original model)
-STUDENT_D_MODEL = 128
-STUDENT_N_HEADS = 2
-STUDENT_E_LAYERS = 1
-STUDENT_D_FF = 128
 
 # %% [markdown]
 # ## Helper Functions for Evaluation
@@ -194,7 +178,7 @@ sample_input = (sample_temporal, sample_static)
 print("Data loading successful.")
 
 # %% [markdown]
-# ## Load Original Informer Model
+# ## Load Original Model
 #
 # Use the project's model loading utility to load the pretrained model.
 
@@ -226,7 +210,7 @@ original_metrics = print_model_report(model_name, original_model, test_loader, s
 
 # %% [markdown]
 # ### Visualize Model Predictions Over Time
-
+# Check if the model is loaded correctly
 # %%
 # Define target scaler from the data_metadata
 target_scaler = scalers.get(f'{TARGET_VARIABLE}_scaler')
@@ -247,8 +231,6 @@ viz_fig = plot_predictions_over_time(
     start_idx=40,
     device=device       # Adjust as needed
 )
-
-# Display the plot if in a notebook environment
 plt.show()
 
 # %% [markdown]
@@ -256,14 +238,24 @@ plt.show()
 #
 # Quantization reduces model precision from float32 to int8 to decrease model size and improve inference speed.
 #
-# Quantization is done on the CPU.
+# The quantization in this section is done on the CPU with ONNX Runtime.
+
 # %% [markdown]
-# ## Technique 1a: ONNX Quantization (CPU)
+# ## Technique 1a: Int8 Quantization with ONNX (CPU)
 #
 # This section demonstrates exporting the PyTorch model to ONNX format and applying ONNX dynamic quantization for model efficiency.
+#
+# Steps:
+# 1. Export the original PyTorch model to ONNX
+# 2. Quantize the ONNX model with ONNX Runtime
+# 3. Evaluate the quantized model
 
 # %%
 # Define an ONNX wrapper to preserve batch dimension in the output
+import onnx
+from onnxruntime.quantization import quantize_dynamic, QuantType
+import onnxruntime as ort
+
 class OnnxModelWrapper(nn.Module):
     def __init__(self, model):
         super(OnnxModelWrapper, self).__init__()
@@ -380,17 +372,88 @@ def evaluate_onnx_model(model_path):
 # Technique 1a: ONNX CPU Quantization Results
 print("\n===== Technique 1a: ONNX CPU Quantization Results =====")
 onnx_orig_metrics = evaluate_onnx_model(onnx_model_path)
-onnx_quant_metrics = evaluate_onnx_model(quantized_onnx_model_path)
+onnx_int8_metrics = evaluate_onnx_model(quantized_onnx_model_path)
 print(f"{'Model':<30}{'Size (MB)':<12}{'Latency(ms)':<15}{'MAE':<10}")
 print('-'*67)
 print(f"{'Original ONNX CPU':<30}{onnx_orig_metrics['size']:<12.2f}{onnx_orig_metrics['inference_time']*1000:<15.2f}{onnx_orig_metrics['mae']:<10.4f}")
-print(f"{'Quantized ONNX CPU':<30}{onnx_quant_metrics['size']:<12.2f}{onnx_quant_metrics['inference_time']*1000:<15.2f}{onnx_quant_metrics['mae']:<10.4f}")
+print(f"{'Int8 ONNX CPU':<30}{onnx_int8_metrics['size']:<12.2f}{onnx_int8_metrics['inference_time']*1000:<15.2f}{onnx_int8_metrics['mae']:<10.4f}")
+print()
+
+
+# %% [markdown]
+# ## Technique 1b: Int4 Quantization with ONNX (CPU)
+#
+# Int4 quantization is an extreme form of quantization that reduces model weights to 4-bit integers.
+# This technique significantly reduces model size with some potential impact on accuracy.
+# It's especially effective for large transformer models.
+
+# %%
+print("\n===== Technique 1b: ONNX Int4 Quantization =====")
+
+from onnxruntime.quantization import (
+    matmul_4bits_quantizer,
+    quant_utils,
+)
+from pathlib import Path
+
+# Define input/output paths
+model_fp32_path = onnx_model_path  # Re-use the original FP32 ONNX model
+model_int4_path = f"checkpoints/{base_checkpoint_name}_quantized_int4.onnx"
+
+print(f"Creating Int4 quantized model at {model_int4_path}")
+
+# Configure Int4 quantization settings
+quant_config = matmul_4bits_quantizer.DefaultWeightOnlyQuantConfig(
+    block_size=128,  # 2's exponential and >= 16
+    is_symmetric=True,  # if true, quantize to Int4, otherwise, quantize to uint4
+    accuracy_level=4,  # used by MatMulNbits
+    quant_format=quant_utils.QuantFormat.QOperator,
+    op_types_to_quantize=("MatMul", "Gather"),  # specify which op types to quantize
+    quant_axes=(("MatMul", 0), ("Gather", 1),)  # specify which axis to quantize for an op type
+)
+
+# Load the model with shape inference
+model = quant_utils.load_model_with_shape_infer(Path(model_fp32_path))
+
+# Create the quantizer
+quant = matmul_4bits_quantizer.MatMul4BitsQuantizer(
+    model,
+    nodes_to_exclude=None,  # specify a list of nodes to exclude from quantization
+    nodes_to_include=None,  # specify a list of nodes to force include from quantization
+    algo_config=quant_config,
+)
+
+# Apply quantization
+quant.process()
+
+# Save the quantized model
+quant.model.save_model_to_file(
+    model_int4_path,
+    True  # save data to external file
+)
+
+quant_int4_size = os.path.getsize(model_int4_path) / (1024 * 1024)
+print(f"Int4 Quantized ONNX model size: {quant_int4_size:.2f} MB")
+print(f"Size reduction: {(orig_onnx_size - quant_int4_size) / orig_onnx_size * 100:.2f}%")
+
+# Evaluate Int4 model
+print("\nEvaluating Int4 quantized model on CPU...")
+onnx_int4_metrics = evaluate_onnx_model(model_int4_path)
+
+# Add to our comparison table
+print("\n===== Int4 Quantization Results =====")
+print(f"{'Model':<30}{'Size (MB)':<12}{'Latency(ms)':<15}{'MAE':<10}")
+print('-'*67)
+print(f"{'Original ONNX CPU':<30}{onnx_orig_metrics['size']:<12.2f}{onnx_orig_metrics['inference_time']*1000:<15.2f}{onnx_orig_metrics['mae']:<10.4f}")
+print(f"{'Int8 ONNX CPU':<30}{onnx_int8_metrics['size']:<12.2f}{onnx_int8_metrics['inference_time']*1000:<15.2f}{onnx_int8_metrics['mae']:<10.4f}")
+print(f"{'Int4 ONNX CPU':<30}{onnx_int4_metrics['size']:<12.2f}{onnx_int4_metrics['inference_time']*1000:<15.2f}{onnx_int4_metrics['mae']:<10.4f}")
 print()
 
 # %% [markdown]
-# ## Technique 1b: FP16 Quantization (Requires CUDA GPU)
+# ## Technique 1c: FP16 Quantization (Requires CUDA GPU)
 #
 # FP16 quantization is a technique that converts the model to FP16 precision to reduce memory usage and improve inference speed.
+#
 # Require libraries:
 # - onnxconverter-common
 # - onnxruntime-gpu
@@ -528,6 +591,10 @@ print()
 # ## Technique 2: Structured Pruning
 #
 # Structured pruning removes less important components to reduce the number of parameters.
+#
+# Steps:
+# 1. Apply different levels of structured pruning to the transformer model using PyTorch's pruning utilities
+# 2. Evaluate the pruned model with different levels of sparsity
 
 # %%
 print("\n===== Technique 2: Structured Pruning =====")
@@ -654,9 +721,59 @@ all_models = [original_metrics, best_pruned_model]
 #
 # Knowledge distillation trains a smaller "student" model to mimic the behavior of the larger "teacher" model,
 # preserving most of the accuracy while using fewer parameters.
+#
+# Steps:
+# 1. Create a smaller student model based on the original model architecture
+# 2. Train the student model with knowledge distillation from the teacher model
+# 3. Evaluate the student model
+
+# %% [markdown]
+# ### Settings for Distillation Training
+
+# %%
+# ========== Distillation Training settings =========
+from utils.wandb_utils import set_wandb_flag, set_keep_run_open
+
+PATIENCE = 5  # Early stopping patience
+LR = 0.0001
+if DEBUG_MODE:
+    BATCH_SIZE = 2**10
+    NUM_WORKERS = 4
+    EPOCHS = 10
+    USE_WANDB = False
+else:
+    BATCH_SIZE = 2**13
+    NUM_WORKERS = 16
+    EPOCHS = 30
+    USE_WANDB = True
+# Enable wandb tracking
+set_wandb_flag(USE_WANDB)
+# Keep the wandb run open after training to continue logging evaluation plots
+set_keep_run_open(True)
+if is_wandb_enabled():
+    wandb.finish()
+# Student model settings (should be lower than the original model)
+STUDENT_D_MODEL = 128
+STUDENT_N_HEADS = 2
+STUDENT_E_LAYERS = 1
+STUDENT_D_FF = 128
+# ======================================================
+
+# %% [markdown]
+# ### Training with Knowledge Distillation
 
 # %%
 print("\n===== Technique 3: Knowledge Distillation =====")
+# Get the current config
+CONFIG = {}
+cur_globals = globals().copy()
+for x in cur_globals:
+    # Only get the variables that are uppercase and not digits
+    if x.upper() == x and not x.startswith('_') and not x == "CONFIG":
+        CONFIG[x] = cur_globals[x]
+metadata = {
+    "model_name": model_name,
+}
 
 # Define distillation loss - combines task loss with matching teacher outputs
 class DistillationLoss(nn.Module):
@@ -703,12 +820,34 @@ def create_student_model(original_model, d_model=STUDENT_D_MODEL, n_heads=STUDEN
     )
 
 # Training function for distillation
+@track_experiment
 def train_with_distillation(teacher_model, student_model, train_loader, val_loader,
                           criterion, optimizer, scheduler=None,
                           epochs=EPOCHS, device=device, patience=PATIENCE,
-                          debug_mode=DEBUG_MODE):
+                          debug_mode=DEBUG_MODE, model_name="DistilledModel",
+                          target_scaler=None, config=None):
     """
     Train the student model with knowledge distillation from the teacher
+
+    Args:
+        teacher_model: Teacher model for knowledge distillation
+        student_model: Student model to be trained
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        criterion: Loss function for distillation
+        optimizer: Optimizer for training
+        scheduler: Learning rate scheduler (optional)
+        epochs: Maximum number of epochs
+        device: Device to train on
+        patience: Early stopping patience
+        debug_mode: Whether to run in debug mode (limit batches)
+        model_name: Name of the model for logging
+        target_scaler: Scaler for the target variable
+        config: Configuration dictionary
+
+    Returns:
+        student_model: Trained student model
+        best_val_loss: Best validation loss achieved
     """
     # Ensure models are on the correct device
     teacher_model = teacher_model.to(device)
@@ -727,6 +866,7 @@ def train_with_distillation(teacher_model, student_model, train_loader, val_load
         train_losses = []
         task_losses = []
         distill_losses = []
+        train_samples = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
         for i, batch in enumerate(pbar):
@@ -737,6 +877,7 @@ def train_with_distillation(teacher_model, student_model, train_loader, val_load
             temporal_features = batch['temporal_features'].to(device)
             static_features = batch['static_features'].to(device)
             targets = batch['target'].to(device)
+            train_samples += targets.size(0)
 
             # Forward pass through teacher model (no grad needed)
             with torch.no_grad():
@@ -768,6 +909,11 @@ def train_with_distillation(teacher_model, student_model, train_loader, val_load
         # Validation phase
         student_model.eval()
         val_losses = []
+        val_task_losses = []
+        val_distill_losses = []
+        val_samples = 0
+        student_preds = []
+        val_targets_list = []
 
         with torch.no_grad():
             for i, batch in enumerate(tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]")):
@@ -778,29 +924,68 @@ def train_with_distillation(teacher_model, student_model, train_loader, val_load
                 temporal_features = batch['temporal_features'].to(device)
                 static_features = batch['static_features'].to(device)
                 targets = batch['target'].to(device)
+                val_samples += targets.size(0)
 
                 # Forward pass
                 teacher_outputs = teacher_model(temporal_features, static_features)
                 student_outputs = student_model(temporal_features, static_features)
 
                 # Calculate loss
-                loss, _, _ = criterion(student_outputs, teacher_outputs, targets)
+                loss, task_loss, distill_loss = criterion(student_outputs, teacher_outputs, targets)
                 val_losses.append(loss.item())
+                val_task_losses.append(task_loss.item())
+                val_distill_losses.append(distill_loss.item())
+
+                # Store predictions and targets for MAE calculation - reshape to ensure consistent dimensions
+                student_preds.append(student_outputs.cpu().numpy().flatten())
+                val_targets_list.append(targets.cpu().numpy().flatten())
 
         # Calculate average losses
         avg_train_loss = sum(train_losses) / len(train_losses) if train_losses else 0
         avg_task_loss = sum(task_losses) / len(task_losses) if task_losses else 0
         avg_distill_loss = sum(distill_losses) / len(distill_losses) if distill_losses else 0
+
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
+        avg_val_task_loss = sum(val_task_losses) / len(val_task_losses) if val_task_losses else 0
+        avg_val_distill_loss = sum(val_distill_losses) / len(val_distill_losses) if val_distill_losses else 0
+
+        # Calculate MAE if we have target_scaler
+        student_preds_concat = np.concatenate(student_preds)
+        val_targets_concat = np.concatenate(val_targets_list)
+
+        if target_scaler is not None:
+            student_preds_orig = target_scaler.inverse_transform(student_preds_concat.reshape(-1, 1)).flatten()
+            val_targets_orig = target_scaler.inverse_transform(val_targets_concat.reshape(-1, 1)).flatten()
+            val_mae = mean_absolute_error(val_targets_orig, student_preds_orig)
+        else:
+            val_mae = mean_absolute_error(val_targets_concat, student_preds_concat)
 
         print(f"Epoch {epoch+1}/{epochs} - "
               f"Train Loss: {avg_train_loss:.4f} "
               f"(Task: {avg_task_loss:.4f}, Distill: {avg_distill_loss:.4f}) - "
-              f"Val Loss: {avg_val_loss:.4f}")
+              f"Val Loss: {avg_val_loss:.4f} "
+              f"(Task: {avg_val_task_loss:.4f}, Distill: {avg_val_distill_loss:.4f}) - "
+              f"Val MAE: {val_mae:.4f}")
 
         # Learning rate scheduler step
         if scheduler is not None:
             scheduler.step(avg_val_loss)
+
+        # Log metrics to wandb
+        if is_wandb_enabled():
+            log_dict = {
+                'train/epoch': epoch,
+                'train/loss': avg_train_loss,
+                'train/task_loss': avg_task_loss,
+                'train/distill_loss': avg_distill_loss,
+                'train/learning_rate': optimizer.param_groups[0]['lr'],
+                'val/epoch': epoch,
+                'val/loss': avg_val_loss,
+                'val/task_loss': avg_val_task_loss,
+                'val/distill_loss': avg_val_distill_loss,
+                'val/mae': val_mae,
+            }
+            wandb.log(log_dict)
 
         # Early stopping
         if avg_val_loss < best_val_loss:
@@ -838,7 +1023,7 @@ print_model_info(student_model, temporal_shape=sample_input[0].shape,
 
 # Configure distillation training
 distillation_loss = DistillationLoss(alpha=0.5, temperature=2.0)
-optimizer = torch.optim.Adam(student_model.parameters(), lr=LEARNING_RATE)
+optimizer = torch.optim.Adam(student_model.parameters(), lr=LR)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, mode='min', factor=0.5, patience=2, verbose=True
 )
@@ -857,21 +1042,14 @@ student_model, best_val_loss = train_with_distillation(
     scheduler=scheduler,
     epochs=EPOCHS,
     patience=PATIENCE,
-    debug_mode=DEBUG_MODE
+    debug_mode=DEBUG_MODE,
+    model_name=f"{model_name}_student",
+    target_scaler=target_scaler,
+    config=CONFIG
 )
 
 # Save the trained student model
 student_model_path = f"checkpoints/{base_checkpoint_name}_student.pt"
-# Get the current config
-CONFIG = {}
-cur_globals = globals().copy()
-for x in cur_globals:
-    # Only get the variables that are uppercase and not digits
-    if x.upper() == x and not x.startswith('_') and not x == "CONFIG":
-        CONFIG[x] = cur_globals[x]
-metadata = {
-    "model_name": model_name,
-}
 save_model(student_model, student_model_path, temporal_features=SELECTED_FEATURES, static_features=STATIC_FEATURES,
            target_field=TARGET_VARIABLE, config=CONFIG, time_feature_keys=TIME_FEATURES)
 print(f"Saved student model to {student_model_path}")
@@ -908,6 +1086,8 @@ viz_fig = plot_predictions_over_time(
 )
 
 plt.show()
+if is_wandb_enabled():
+    wandb.finish()
 
 # Add student model to overall comparison
 all_models = [original_metrics, best_pruned_model, student_metrics]
@@ -978,16 +1158,3 @@ print("-" * 70)
 
 for imp in improvements:
     print(f"{imp['name']:<20} {imp['size_reduction']:>6.2f}% {imp['speed_improvement']:>18.2f}% {imp['accuracy_change']:>14.2f}%")
-
-# %% [markdown]
-# ## Conclusion
-#
-# This notebook demonstrated three key model efficiency techniques for the Informer model:
-#
-# 1. **Quantization**: Achieved significant size reduction with minimal accuracy impact
-# 2. **Structured Pruning**: Reduced model size by removing attention heads
-# 3. **Knowledge Distillation**: Created a smaller student model that mimics the larger teacher
-#
-# The most effective approach appears to be combining knowledge distillation with quantization, which provides the best balance of model size reduction, inference speed, and maintained accuracy.
-#
-# These techniques are valuable for deploying models in resource-constrained environments and reducing the carbon footprint of AI systems through improved computational efficiency.
