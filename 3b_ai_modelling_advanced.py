@@ -3,11 +3,11 @@
 #
 # This notebook implements state-of-the-art deep learning architectures for Global Horizontal Irradiance (GHI) forecasting using time series weather data. Building on the basic models in `3a_ai_modelling_basic.py`, this notebook explores more sophisticated architectures:
 #
-# 1. **TCN (Temporal Convolutional Network)** - Specialized convolutional architecture with dilated convolutions for sequence modeling
-# 2. **Transformer** - Attention-based architecture, adapted for time series forecasting
-# 3. **Informer** - Advanced Transformer variant optimized for long sequence time-series forecasting
-# 4. **TSMixer** - Simple yet effective architecture for time series forecasting
-# 5. **iTransformer** - Inverted Transformer architecture for time series forecasting
+# 1. **Transformer** - Attention-based architecture, adapted for time series forecasting
+# 2. **Informer** - Advanced Transformer variant optimized for long sequence time-series forecasting
+# 3. **TSMixer** - Simple yet effective architecture for time series forecasting
+# 4. **iTransformer** - Inverted Transformer architecture for time series forecasting
+# 5. **Mamba** - Linear-Time Sequence Modeling with Selective State Spaces (SSMs)
 #
 # ## Prerequisites
 #
@@ -29,7 +29,7 @@
 
 # %%
 # Debug mode to test code. Set to False for actual training
-DEBUG_MODE = True
+DEBUG_MODE = False
 
 # %% [markdown]
 # # 1. Data Loading
@@ -358,50 +358,11 @@ def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_
 # These advanced models can capture more complex temporal patterns compared to basic architectures.
 
 # %% [markdown]
-# ### 3.1 Temporal Convolutional Networks (TCN) Model
+# ### 3.1 Transformer Model
 #
-# TCNs are specialized convolutional architectures for sequence modeling that combine the best of CNNs and RNNs. The key features include:
+# The Transformer model, state-of-the-art for sequence modeling, using self-attention mechanisms to capture long-range dependencies.
 #
-# - **Causal Convolutions**: Each output only depends on current and past inputs.
-# - **Dilated Convolutions**: Captures larger effective history with fewer parameters.
-# - **Residual Connections**: Helps with training deep networks and information flow.
-#
-# TCNs can capture long-range patterns in time series data efficiently, making them suitable for solar radiation forecasting where both short-term weather fluctuations and longer-term patterns matter.
-
-# %%
-from models.tcn import TCNModel
-
-# Create TCN model
-tcn_model = TCNModel(
-    input_dim=temporal_dim,
-    static_dim=static_dim,
-    num_channels=[32, 64, 64, 32],    # Number of channels in each layer
-    kernel_size=3,                    # Size of the convolutional kernel
-    dropout=0.1,                      # Dropout rate
-).to(device)
-
-# Print the model
-print_model_info(tcn_model, temporal_features.shape, static_features.shape)
-
-
-# %%
-model_name = "TCN"
-
-# Train the TCN model
-tcn_history, tcn_val_metrics, tcn_test_metrics = run_experiment_pipeline(
-    tcn_model,
-    train_loader,
-    val_loader,
-    test_loader,
-    model_name=model_name,
-    epochs=N_EPOCHS,
-    patience=PATIENCE,
-    lr=LR
-)
-
-# %% [markdown]
-# ### 3.3 Transformer Model
-# Same as the Transformer model but with LayerNorm instead of BatchNorm
+# For detailed model code: `models/transformer.py`
 
 # %%
 from models.transformer import TransformerModel
@@ -437,18 +398,20 @@ transformer_history, transformer_val_metrics, transformer_test_metrics = run_exp
 )
 
 # %% [markdown]
-# ### 3.4 Informer Model
+# ### 3.2 Informer Model
 #
-# The Informer model is a recent advancement in time series forecasting that addresses the limitations of standard Transformer models for long sequence prediction. Key innovations include:
+# The Informer model is a recent advancement in time series forecasting that addresses the computational limitations of standard Transformer models for long sequence prediction. Key innovations include:
 #
 # - **ProbSparse Self-attention**: Reduces complexity from O(L²) to O(L log L) where L is sequence length.
 # - **Self-attention Distilling**: Progressive downsampling of hidden states along the encoder.
 # - **Generative Decoder**: Enables long sequence prediction with minimal compute.
 #
 # For solar radiation forecasting, Informer can efficiently capture daily, weekly, and seasonal patterns while focusing computational resources on the most informative timestamps.
+#
+# For detailed model code: `models/informer.py`
 
 # %%
-from models.informer_mimick import InformerModel
+from models.informer import InformerModel
 
 # Create Informer model
 informer_model = InformerModel(
@@ -482,7 +445,7 @@ informer_history, informer_val_metrics, informer_test_metrics = run_experiment_p
 )
 
 # %% [markdown]
-# ### 3.5 TSMixer Model
+# ### 3.3 TSMixer Model
 #
 # TSMixer is a simple yet effective architecture for time series forecasting that applies the ideas of MLP-Mixer to time series data:
 #
@@ -490,7 +453,7 @@ informer_history, informer_val_metrics, informer_test_metrics = run_experiment_p
 # - **Parameter efficiency**: Uses simple MLP blocks to mix information across dimensions
 # - **Fast training**: Simple architecture allows for efficient training
 #
-# For solar radiation forecasting, TSMixer can effectively capture both temporal patterns and feature interactions with a lightweight architecture.
+# For detailed model code: `models/tsmixer.py`
 
 # %%
 from models.tsmixer import TSMixerModel
@@ -528,7 +491,7 @@ tsmixer_history, tsmixer_val_metrics, tsmixer_test_metrics = run_experiment_pipe
 )
 
 # %% [markdown]
-# ### 3.6 iTransformer Model
+# ### 3.4 iTransformer Model
 #
 # iTransformer is an innovative approach to time series forecasting that inverts the traditional Transformer architecture:
 #
@@ -536,7 +499,7 @@ tsmixer_history, tsmixer_val_metrics, tsmixer_test_metrics = run_experiment_pipe
 # - **Feature as Tokens**: Treats each feature as a token (rather than each timestamp)
 # - **Improved Feature Interactions**: Better captures correlations between different variables
 #
-# For solar radiation forecasting, iTransformer can effectively model relationships between different meteorological variables, potentially leading to more accurate predictions.
+# For detailed model code: `models/itransformer.py`
 
 # %%
 from models.itransformer import iTransformerModel
@@ -574,6 +537,55 @@ itransformer_history, itransformer_val_metrics, itransformer_test_metrics = run_
 )
 
 # %% [markdown]
+# ### 3.5 Mamba Model
+#
+# Mamba is a state-of-the-art architecture that uses State Space Models (SSMs) instead of attention mechanisms:
+#
+# - **Selective State Space Modeling**: Captures long-range dependencies with linear scaling to sequence length
+# - **Data-dependent Parameters**: Adapts model parameters based on input data
+# - **Local Convolution**: Enhances local pattern recognition with a convolutional layer
+# - **Efficient Processing**: Linear time complexity O(L) compared to quadratic complexity O(L²) of Transformers
+#
+# For detailed model code: `models/mamba.py`
+
+# %%
+from models.mamba import MambaModel
+
+# Create Mamba model
+mamba_model = MambaModel(
+    input_dim=temporal_dim,           # Number of input features
+    static_dim=static_dim,            # Number of static features
+    d_model=128,                      # Model dimension
+    d_state=16,                       # State dimension for SSM (reduced from 64)
+    n_layers=1,                       # Number of Mamba blocks (reduced to 1)
+    dt_rank=16,                       # Rank for delta (Δ) projection
+    d_conv=4,                         # Kernel size for local convolution
+    expand_factor=2,                  # Expansion factor for inner dimension
+    dt_min=0.001,                     # Minimum delta value
+    dt_max=0.1,                       # Maximum delta value
+    dropout=0.1,                      # Dropout rate
+).to(device)
+
+# Print the model
+print_model_info(mamba_model, temporal_features.shape, static_features.shape)
+
+
+# %%
+model_name = "Mamba"
+
+# Train the Mamba model
+mamba_history, mamba_val_metrics, mamba_test_metrics = run_experiment_pipeline(
+    mamba_model,
+    train_loader,
+    val_loader,
+    test_loader,
+    model_name=model_name,
+    epochs=N_EPOCHS,
+    patience=PATIENCE,
+    lr=LR
+)
+
+# %% [markdown]
 # ## 4. Model Comparison
 #
 # After training all models, we compare their performance to determine which advanced architecture works best for GHI forecasting.
@@ -594,7 +606,8 @@ model_metrics = {
     'Transformer': transformer_test_metrics,
     'Informer': informer_test_metrics,
     'TSMixer': tsmixer_test_metrics,
-    'iTransformer': itransformer_test_metrics
+    'iTransformer': itransformer_test_metrics,
+    'Mamba': mamba_test_metrics
 }
 # Drop the 'y_pred' and 'y_true' keys from the model metrics
 for model in model_metrics:
@@ -871,8 +884,8 @@ def plot_predictions_over_time(models, model_names, data_loader, target_scaler, 
 # %%
 # Plot time series predictions for advanced models
 _ = plot_predictions_over_time(
-    models=[tcn_model, transformer_model, informer_model, tsmixer_model, itransformer_model],
-    model_names=['TCN', 'Transformer', 'Informer', 'TSMixer', 'iTransformer'],
+    models=[tcn_model, transformer_model, informer_model, tsmixer_model, itransformer_model, mamba_model],
+    model_names=['TCN', 'Transformer', 'Informer', 'TSMixer', 'iTransformer', 'Mamba'],
     data_loader=test_loader,
     target_scaler=scalers[f'{TARGET_VARIABLE}_scaler'],
     num_samples=72,

@@ -7,6 +7,7 @@
 # 2. **CNN-LSTM** - Hybrid model combining convolutional layers for feature extraction and LSTM for temporal pattern learning
 # 3. **MLP (Multi-Layer Perceptron)** - Standard feedforward neural network for regression tasks
 # 4. **1D CNN** - Convolutional neural network using 1D convolutions for time series processing
+# 5. **TCN (Temporal Convolutional Network)** - Specialized convolutional architecture with dilated convolutions for sequence modeling
 #
 # ## Prerequisites
 #
@@ -358,6 +359,8 @@ def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_
 #
 # The Long Short-Term Memory (LSTM) network is a type of recurrent neural network well-suited for time series forecasting.
 # It's designed to capture long-term dependencies in sequential data through specialized memory cells.
+#
+# For detailed model code: `models/lstm.py`
 
 # %%
 from models.lstm import LSTMModel
@@ -397,6 +400,8 @@ lstm_history, lstm_val_metrics, lstm_test_metrics = run_experiment_pipeline(
 #
 # The CNN-LSTM model combines convolutional layers with LSTM layers. The CNN component extracts features from the input data,
 # which are then fed into LSTM layers to capture temporal patterns. This hybrid approach can be effective for time series with spatial correlations.
+#
+# For detailed model code: `models/cnn_lstm.py`
 
 # %%
 from models.cnn_lstm import CNNLSTMModel
@@ -438,6 +443,8 @@ cnn_lstm_history, cnn_lstm_val_metrics, cnn_lstm_test_metrics = run_experiment_p
 #
 # The MLP is a classic feedforward neural network with fully connected layers. While not specifically designed for sequential data,
 # with proper feature engineering, MLPs can still perform well on time series tasks. Here, we flatten the temporal features to use with the MLP.
+#
+# For detailed model code: `models/mlp.py`
 
 # %%
 from models.mlp import MLPModel
@@ -508,6 +515,50 @@ cnn1d_history, cnn1d_val_metrics, cnn1d_test_metrics = run_experiment_pipeline(
 )
 
 # %% [markdown]
+# ### 3.5 Temporal Convolutional Networks (TCN) Model
+#
+# TCNs are specialized convolutional architectures for sequence modeling that combine the best of CNNs and RNNs. The key features include:
+#
+# - **Causal Convolutions**: Each output only depends on current and past inputs.
+# - **Dilated Convolutions**: Captures larger effective history with fewer parameters.
+# - **Residual Connections**: Helps with training deep networks and information flow.
+#
+# TCNs can capture long-range patterns in time series data efficiently, making them suitable for solar radiation forecasting where both short-term weather fluctuations and longer-term patterns matter.
+#
+# For detailed model code: `models/tcn.py`
+
+# %%
+from models.tcn import TCNModel
+
+# Create TCN model
+tcn_model = TCNModel(
+    input_dim=temporal_dim,
+    static_dim=static_dim,
+    num_channels=[32, 64, 64, 32],    # Number of channels in each layer
+    kernel_size=3,                    # Size of the convolutional kernel
+    dropout=0.1,                      # Dropout rate
+).to(device)
+
+# Print the model
+print_model_info(tcn_model, temporal_features.shape, static_features.shape)
+
+
+# %%
+model_name = "TCN"
+
+# Train the TCN model
+tcn_history, tcn_val_metrics, tcn_test_metrics = run_experiment_pipeline(
+    tcn_model,
+    train_loader,
+    val_loader,
+    test_loader,
+    model_name=model_name,
+    epochs=N_EPOCHS,
+    patience=PATIENCE,
+    lr=LR
+)
+
+# %% [markdown]
 # ## 4. Model Comparison
 #
 # After training all models, we compare their performance to determine which architecture works best for GHI forecasting.
@@ -526,7 +577,8 @@ model_metrics = {
     'LSTM': lstm_test_metrics,
     'CNN-LSTM': cnn_lstm_test_metrics,
     'MLP': mlp_test_metrics,
-    '1D-CNN': cnn1d_test_metrics
+    '1D-CNN': cnn1d_test_metrics,
+    'TCN': tcn_test_metrics
 }
 # Drop the 'y_pred' and 'y_true' keys from the model metrics
 for model in model_metrics:
@@ -804,8 +856,8 @@ def plot_predictions_over_time(models, model_names, data_loader, target_scaler, 
 # %%
 # Plot time series predictions
 _ = plot_predictions_over_time(
-    models=[lstm_model, cnn_lstm_model, mlp_model, cnn1d_model],
-    model_names=['LSTM', 'CNN-LSTM', 'MLP', '1D-CNN'],
+    models=[lstm_model, cnn_lstm_model, mlp_model, cnn1d_model, tcn_model],
+    model_names=['LSTM', 'CNN-LSTM', 'MLP', '1D-CNN', 'TCN'],
     data_loader=test_loader,
     target_scaler=scalers[f'{TARGET_VARIABLE}_scaler'],
     num_samples=72,
