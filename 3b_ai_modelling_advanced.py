@@ -373,7 +373,7 @@ transformer_model = TransformerModel(
     static_dim=static_dim,            # Dimension of static features
     d_model=128,                      # Model dimension
     n_heads=4,                        # Number of attention heads
-    e_layers=1,                       # Number of encoder layers
+    e_layers=2,                       # Number of encoder layers
     d_ff=256,                         # Dimension of feedforward network
     dropout=0.1,                      # Dropout rate
     activation='gelu'                 # Activation function
@@ -419,7 +419,7 @@ informer_model = InformerModel(
     static_dim=static_dim,
     d_model=128,
     n_heads=4,
-    e_layers=1,
+    e_layers=2,
     d_ff=256,
     dropout=0.1,
     activation='gelu',
@@ -510,7 +510,7 @@ itransformer_model = iTransformerModel(
     static_dim=static_dim,            # Number of static features
     d_model=128,                      # Model dimension
     n_heads=4,                        # Number of attention heads
-    e_layers=1,                       # Number of encoder layers
+    e_layers=2,                       # Number of encoder layers
     d_ff=256,                         # Dimension of feedforward network
     dropout=0.1,                      # Dropout rate
     lookback=LOOKBACK,                # Historical sequence length
@@ -556,9 +556,9 @@ mamba_model = MambaModel(
     input_dim=temporal_dim,           # Number of input features
     static_dim=static_dim,            # Number of static features
     d_model=128,                      # Model dimension
-    d_state=16,                       # State dimension for SSM (reduced from 64)
-    n_layers=1,                       # Number of Mamba blocks (reduced to 1)
-    dt_rank=16,                       # Rank for delta (Δ) projection
+    d_state=16,                       # State dimension for SSM
+    n_layers=2,                       # Number of Mamba blocks
+    dt_rank=32,                       # Rank for delta (Δ) projection
     d_conv=4,                         # Kernel size for local convolution
     expand_factor=2,                  # Expansion factor for inner dimension
     dt_min=0.001,                     # Minimum delta value
@@ -602,7 +602,6 @@ from utils.plot_utils import compare_models
 
 # Create a dictionary of model metrics
 model_metrics = {
-    'TCN': tcn_test_metrics,
     'Transformer': transformer_test_metrics,
     'Informer': informer_test_metrics,
     'TSMixer': tsmixer_test_metrics,
@@ -884,8 +883,8 @@ def plot_predictions_over_time(models, model_names, data_loader, target_scaler, 
 # %%
 # Plot time series predictions for advanced models
 _ = plot_predictions_over_time(
-    models=[tcn_model, transformer_model, informer_model, tsmixer_model, itransformer_model, mamba_model],
-    model_names=['TCN', 'Transformer', 'Informer', 'TSMixer', 'iTransformer', 'Mamba'],
+    models=[transformer_model, informer_model, tsmixer_model, itransformer_model, mamba_model],
+    model_names=['Transformer', 'Informer', 'TSMixer', 'iTransformer', 'Mamba'],
     data_loader=test_loader,
     target_scaler=scalers[f'{TARGET_VARIABLE}_scaler'],
     num_samples=72,
