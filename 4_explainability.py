@@ -2,15 +2,12 @@
 # # Model Explainability Example
 #
 # This notebook demonstrates how to use the `explainability` module to understand predictions from trained solar radiation forecasting models. It covers:
+# - **SHAP**: based on the Shapley values from game theory, which describe the contribution of each feature at each time step to the model's output.
+#   - **kernel**: model agnostic, by averaging over all possible feature combinations, but computationally expensive for large models.
+#   - **gradient**: Deep Learning-based, computationally efficient.
+# - **Sensitivity Analyzer**: alternative to SHAP, which based on the gradient of the model output with respect to the input features. This is customized for this coursework implementation to analyze temporal features as a whole (without looking at each time step individually).
 #
-# 1. Setting up parameters (model type, paths, etc.)
-# 2. Loading data and a pre-trained model.
-# 3. Creating an appropriate explainer (SHAP or Sensitivity Analyzer).
-# 4. Preparing data samples for explanation.
-# 5. Running the explanation process.
-# 6. Visualizing results (feature importance, sensitivity plots).
-#
-# **Note:** You need to provide paths to your trained model and test data.
+# To make our explainability more meaningful to GHI predictions, we will use the daytime predictions from the test set only, excluding the nighttime time steps (where GHI is mostly 0).
 
 # %% [markdown]
 # ## 1. Imports and Setup
@@ -21,8 +18,6 @@
 # Set autoreload to mode 2
 # %autoreload 2
 
-import os
-import sys
 import torch
 import numpy as np
 import pandas as pd
@@ -50,16 +45,20 @@ np.random.seed(42)
 # ## 2. Configuration Parameters
 #
 # Set the parameters for the explanation process. These correspond to the command-line arguments in the original script.
+# Change `SHAP_ALGORITHM` to `'kernel'` or `'gradient'` to use different SHAP algorithm.
+# This notebook uses `'gradient'` algorithm as default.
+#
+# If you got Out of Memory (OOM) error, try to reduce `N_SAMPLES` to a smaller number.
 
 # %%
 # --- Configuration ---
-MODEL_PATH = 'checkpoints/Informer_best_20250430_214758.pt' # <<< --- IMPORTANT: Set path to your trained model file
+MODEL_PATH = 'checkpoints/Mamba_best_20250507_231628.pt' # <<< --- IMPORTANT: Set path to your trained model file
 SCALER_PATH = 'data/processed/scalers_20250430_145206.pkl' # <<< --- IMPORTANT: Set path to your scaler file
 TRAIN_PREPROCESSED_DATA_PATH = 'data/processed/train_normalized_20250430_145157.h5' # <<< --- IMPORTANT: Set path to your train data file
 TEST_PREPROCESSED_DATA_PATH = 'data/processed/test_normalized_20250430_145205.h5' # <<< --- IMPORTANT: Set path to your test data file
 LOOKBACK = 24      # Lookback window used during model training
 BATCH_SIZE = 64    # Batch size for data loading
-N_SAMPLES = 50    # Number of explanation samples from the test set to use
+N_SAMPLES = 400    # Number of explanation samples from the test set to use
 BACKGROUND_SIZE = 20  # Number of background samples from the training set to use
 OUTPUT_DIR = 'explainability' # Directory to save results
 SHAP_ALGORITHM = 'gradient' # SHAP algorithm ('kernel' = model agnostic, 'gradient' = Deep Learning)
@@ -94,8 +93,8 @@ try:
 
     # Ensure model is on the correct device
     model = model.to(device)
-    # Make sure model is in evaluation mode to disable batch norm statistics updates
-    model.eval()
+    # Make sure model is in training mode to enable gradient computation
+    model.train()
 
     # Extract feature information from model metadata
     temporal_features = model_metadata.get('temporal_features', [])
@@ -186,7 +185,6 @@ if target_scaler is None:
 
 # Visualize the loaded model's predictions
 print("Generating predictions visualization...")
-model.eval()  # Set model to evaluation mode
 
 # Create the visualization using the imported function
 viz_fig = plot_predictions_over_time(
@@ -256,6 +254,8 @@ print(f"Explainer created: {type(explainer).__name__}")
 # This approach is more meaningful as it uses the distribution the model was trained on as the baseline.
 # Using the full training set can be computationally expensive, especially for methods like KernelSHAP,
 # so we select a subset of samples.
+#
+# We also exclude nighttime samples from the background data as they are not valuable for GHI explanation.
 
 # %%
 # --- Prepare background data from TRAIN set ---
@@ -392,42 +392,22 @@ print(f"X_temporal_array shape: {X_temporal_array.shape}")
 print(f"X_static_array shape: {X_static_array.shape}")
 
 # Extract shape information for feature naming
-if len(X_temporal_array.shape) == 3:  # (batch, sequence, features)
-    batch_size, seq_len, n_features = X_temporal_array.shape
-    print(f"Detected shape: batch_size={batch_size}, seq_len={seq_len}, n_features={n_features}")
+batch_size, seq_len, n_features = X_temporal_array.shape
+print(f"Detected shape: batch_size={batch_size}, seq_len={seq_len}, n_features={n_features}")
 
-    # Create meaningful feature names by combining temporal feature names with time steps
-    feature_names_flat = []
-    for t in range(seq_len):
-        for feat_idx, feat_name in enumerate(temporal_features):
-            # Create more descriptive feature names with time indices
-            feature_names_flat.append(f"{feat_name}_t-{seq_len-1-t}")
+# Create meaningful feature names by combining temporal feature names with time steps
+feature_names_flat = []
+for t in range(seq_len):
+    for feat_idx, feat_name in enumerate(temporal_features):
+        # Create more descriptive feature names with time indices
+        feature_names_flat.append(f"{feat_name}_t-{seq_len-1-t}")
 
-    # Add static feature names if available
-    if static_features is not None and len(static_features) > 0:
-        feature_names_flat.extend(static_features)
-        print(f"Added {len(static_features)} static features to feature_names_flat")
+# Add static feature names if available
+if static_features is not None and len(static_features) > 0:
+    feature_names_flat.extend(static_features)
+    print(f"Added {len(static_features)} static features to feature_names_flat")
 
-    print(f"Created {len(feature_names_flat)} feature names")
-else:
-    print(f"Data array shape: {X_temporal_array.shape}")
-    n_features = len(temporal_features)
-    seq_len = X_temporal_array.shape[1] // n_features
-    print(f"Inferred shape: seq_len={seq_len}, n_features={n_features}")
-
-    # Create meaningful feature names
-    feature_names_flat = []
-    for t in range(seq_len):
-        for feat_idx, feat_name in enumerate(temporal_features):
-            feature_names_flat.append(f"{feat_name}_t-{seq_len-1-t}")
-
-    # Add static feature names if available
-    if static_features is not None and len(static_features) > 0:
-        feature_names_flat.extend(static_features)
-        print(f"Added {len(static_features)} static features to feature_names_flat")
-
-    print(f"Created {len(feature_names_flat)} feature names")
-
+print(f"Created {len(feature_names_flat)} feature names")
 # Calculate total number of features (temporal + static)
 total_features = len(feature_names_flat)
 print(f"Total number of features (temporal + static): {total_features}")
@@ -507,6 +487,8 @@ def custom_model_wrapper(x_input, return_pytorch_tensor=False):
     # Forward pass through the model
     if return_pytorch_tensor:
         # For GradientExplainer mode - return tensor directly (with gradient tracking)
+        # Explicitly ensure model is in training mode for LSTM with cuDNN
+        model.train()
         outputs = model(x_temporal, x_static)
         # Ensure outputs have shape (batch_size, num_outputs)
         if len(outputs.shape) == 1:
@@ -636,34 +618,34 @@ if len(feature_names_flat) != X_flat_for_viz.shape[1]:
             feature_names_flat.append(f'feature_{i}')
 
 # For 3D visualizations (if needed later)
-if SHAP_ALGORITHM == 'gradient':
-    # For gradient algorithm, try to reshape temporal SHAP values back to 3D
-    try:
-        n_temporal_elements = seq_len * len(temporal_features)
-        if shap_values.shape[1] >= n_temporal_elements:
-            # Extract just the temporal part of SHAP values
-            temporal_shap_values = shap_values[:, :n_temporal_elements]
-            explain_size = temporal_shap_values.shape[0]
-            # Reshape temporal part to 3D
-            shap_values_3d = temporal_shap_values.reshape(explain_size, seq_len, len(temporal_features))
-            X_3d = X_temporal_explain
-            print(f"Reshaped temporal SHAP values to 3D: {shap_values_3d.shape}")
+# For gradient algorithm, try to reshape temporal SHAP values back to 3D
+try:
+    n_temporal_elements = seq_len * len(temporal_features)
+    if shap_values.shape[1] >= n_temporal_elements:
+        # Extract just the temporal part of SHAP values
+        temporal_shap_values = shap_values[:, :n_temporal_elements]
+        explain_size = temporal_shap_values.shape[0]
+        # Reshape temporal part to 3D
+        shap_values_3d = temporal_shap_values.reshape(explain_size, seq_len, len(temporal_features))
+        X_3d = X_temporal_explain
+        print(f"Reshaped temporal SHAP values to 3D: {shap_values_3d.shape}")
 
-            # If static features exist, extract their SHAP values too
-            if len(static_features or []) > 0:
-                static_shap_values = shap_values[:, n_temporal_elements:]
-                print(f"Static SHAP values shape: {static_shap_values.shape}")
-        else:
-            print(f"Warning: SHAP values shape {shap_values.shape} doesn't have enough elements for temporal reshaping")
-            shap_values_3d = None
-            X_3d = None
-    except Exception as e:
-        print(f"Could not reshape temporal SHAP values to 3D: {e}")
+        # If static features exist, extract their SHAP values too
+        if len(static_features or []) > 0:
+            static_shap_values = shap_values[:, n_temporal_elements:]
+            print(f"Static SHAP values shape: {static_shap_values.shape}")
+    else:
+        print(f"Warning: SHAP values shape {shap_values.shape} doesn't have enough elements for temporal reshaping")
         shap_values_3d = None
         X_3d = None
+except Exception as e:
+    print(f"Could not reshape temporal SHAP values to 3D: {e}")
+    shap_values_3d = None
+    X_3d = None
 
 # %% [markdown]
 # ### 6.7 SHAP Explanation - Create Summary Plot
+# In this section, we will create a summary plot for all SHAP values.
 
 # %%
 # Plot SHAP Summary Plot
@@ -707,175 +689,200 @@ plt.close()
 print(f"Summary plot saved to {summary_plot_path}")
 
 # %% [markdown]
-# ### 6.8 SHAP Explanation - Feature Importance Plot
+# ### 6.8 SHAP Explanation - Waterfall Plot for Individual Predictions (High and Mid)
+# In this section, we will create a waterfall plot for a single instance with the highest prediction value and a mid-range prediction value.
 
 # %%
-# Plot Feature Importance Plot
-print("Generating feature importance plot...")
+# Waterfall plot shows feature impact for a single instance
+print("Generating SHAP waterfall plots...")
 
-# Calculate mean absolute SHAP value for each feature
-# Ensure feature_importance is 1-dimensional
-feature_importance = np.abs(shap_values_for_viz).mean(axis=0)
-if len(feature_importance.shape) > 1:
-    print(f"Flattening feature_importance from {feature_importance.shape}")
-    feature_importance = feature_importance.flatten()
+# Select a representative instance to explain (pick one with high prediction value)
+# Run model prediction on all samples to find interesting cases
+X_temp_tensor = torch.tensor(X_temporal_explain, dtype=torch.float32).to(device)
+X_static_tensor = torch.tensor(X_static_explain, dtype=torch.float32).to(device)
 
-print(f"Feature importance shape: {feature_importance.shape}, feature names length: {len(feature_names_flat)}")
+with torch.no_grad():
+    predictions = model(X_temp_tensor, X_static_tensor).cpu().numpy()
 
-# Match feature names to importance values
-if len(feature_names_flat) > len(feature_importance):
-    print(f"Truncating feature names from {len(feature_names_flat)} to {len(feature_importance)}")
-    feature_names_adjusted = feature_names_flat[:len(feature_importance)]
-elif len(feature_names_flat) < len(feature_importance):
-    print(f"Truncating importance values from {len(feature_importance)} to {len(feature_names_flat)}")
-    feature_importance = feature_importance[:len(feature_names_flat)]
-    feature_names_adjusted = feature_names_flat
+# Find instance with highest prediction value (most interesting case)
+high_idx = np.argmax(predictions)
+print(f"Selected instance {high_idx} with highest predicted value: {predictions[high_idx]}")
+
+# For comparison, also find a mid-range prediction
+mid_idx = np.argsort(predictions.flatten())[len(predictions)//2]
+print(f"Selected instance {mid_idx} with mid-range predicted value: {predictions[mid_idx]}")
+
+# Create waterfall plot for high prediction instance
+plt.figure(figsize=(12, 10))
+# The waterfall plot requires a single instance of SHAP values
+shap_values_high = shap_values_for_viz[high_idx]
+feature_names_for_plot = feature_names_flat
+
+# Prepare expected values (base value)
+if hasattr(explainer.explainer, 'expected_value'):
+    expected_value = explainer.explainer.expected_value
+    if isinstance(expected_value, list):
+        expected_value = expected_value[0]  # Take first output if multi-output
+elif hasattr(explainer.explainer, 'data'):
+    # Fall back to mean of background predictions if expected_value not available
+    with torch.no_grad():
+        background_preds = custom_model_wrapper(X_combined_bg)
+        expected_value = np.mean(background_preds)
 else:
-    feature_names_adjusted = feature_names_flat
+    # Default fallback
+    expected_value = 0
 
-# Create a new shap_values array that matches the expected format for plot_feature_importance
-# The function expects the original shap_values array to calculate the mean abs value internally
-shap_values_adjusted = np.zeros((shap_values_for_viz.shape[0], len(feature_names_adjusted)))
-for i in range(shap_values_for_viz.shape[0]):
-    shap_values_adjusted[i] = feature_importance  # Each row is the same
+print(f"Base value for waterfall plot: {expected_value}")
 
-# Now plot using the properly dimensioned arrays
-fig = explainer.plot_feature_importance(
-    shap_values=shap_values_adjusted,  # Pass adjusted shap values
-    feature_names=feature_names_adjusted,  # Pass matched feature names
-    max_display=20,
-    show=False,
-    title=f"{model_type.upper()} Feature Importance (Mean |SHAP Value|)"
+# Create a matplotlib figure to control size and save
+plt.figure(figsize=(14, 10))
+
+# Create a SHAP Explanation object for the waterfall plot
+# This is necessary because waterfall() expects an Explanation object
+explanation = shap.Explanation(
+    values=shap_values_high,
+    base_values=expected_value,
+    data=X_flat_for_viz[high_idx],
+    feature_names=feature_names_for_plot
 )
-importance_plot_path = output_dir / f"{model_type}_feature_importance_{timestamp}.png"
-fig.savefig(importance_plot_path, dpi=300, bbox_inches='tight')
+
+# Draw the waterfall plot with the Explanation object
+shap.plots.waterfall(
+    explanation,
+    max_display=15,  # Limit to top features
+    show=False
+)
+plt.title(f"{model_type.upper()} SHAP Feature Impact - High Prediction Instance")
+plt.tight_layout()
+
+# Save the waterfall plot
+waterfall_high_path = output_dir / f"{model_type}_waterfall_high_{timestamp}.png"
+plt.savefig(waterfall_high_path, dpi=300, bbox_inches='tight')
 plt.show()
-plt.close(fig)
-print(f"Feature importance plot saved to {importance_plot_path}")
+plt.close()
+
+# Create waterfall plot for mid-range prediction instance
+plt.figure(figsize=(12, 10))
+shap_values_mid = shap_values_for_viz[mid_idx]
+
+# Create an Explanation object for the mid-range prediction
+explanation_mid = shap.Explanation(
+    values=shap_values_mid,
+    base_values=expected_value,
+    data=X_flat_for_viz[mid_idx],
+    feature_names=feature_names_for_plot
+)
+
+# Draw the waterfall plot for mid-range instance
+plt.figure(figsize=(14, 10))
+shap.plots.waterfall(
+    explanation_mid,
+    max_display=15,  # Limit to top features
+    show=False
+)
+plt.title(f"{model_type.upper()} SHAP Feature Impact - Mid-Range Prediction Instance")
+plt.tight_layout()
+
+# Save the waterfall plot
+waterfall_mid_path = output_dir / f"{model_type}_waterfall_mid_{timestamp}.png"
+plt.savefig(waterfall_mid_path, dpi=300, bbox_inches='tight')
+plt.show()
+plt.close()
+
+print(f"Waterfall plots saved to {waterfall_high_path} and {waterfall_mid_path}")
 
 # %% [markdown]
-# ### 6.9 SHAP Explanation - Temporal Analysis (for Both Algorithms)
+# ### 6.9 SHAP Explanation - Temporal Analysis on Time Steps
+# In this section, we will create a temporal analysis plot for the SHAP values.
 
 # %%
-# Special temporal visualization that works for both gradient and kernel algorithms
-print(f"Attempting temporal analysis for {SHAP_ALGORITHM} algorithm...")
-
-# Check if we have 3D data for gradient algorithm
-has_3d_data = SHAP_ALGORITHM == 'gradient' and 'X_3d' in locals() and 'shap_values_3d' in locals()
-
-# For kernel algorithm, we need to reshape the flattened values back to 3D
-if SHAP_ALGORITHM == 'kernel' and not has_3d_data:
-    if len(X_temporal_explain.shape) == 3 and len(shap_values.shape) == 2:
-        # Get original 3D dimensions
-        batch_size, seq_len, n_features = X_temporal_explain.shape
-
-        # Check if shap_values can be reshaped to match
-        if shap_values.shape[1] == seq_len * n_features:
-            print(f"Reshaping kernel SHAP values from {shap_values.shape} back to 3D ({batch_size}, {seq_len}, {n_features})")
-            try:
-                # Reshape flattened SHAP values back to 3D for temporal analysis
-                shap_values_3d = shap_values.reshape(batch_size, seq_len, n_features)
-                X_3d = X_temporal_explain
-                has_3d_data = True
-                print("Successfully reshaped kernel SHAP values for temporal analysis")
-            except Exception as e:
-                print(f"Error reshaping kernel SHAP values: {e}")
-                has_3d_data = False
-        else:
-            print(f"Cannot reshape kernel SHAP values: dimensions don't match. SHAP values shape: {shap_values.shape}, expected features: {seq_len * n_features}")
-            has_3d_data = False
-    else:
-        print(f"Cannot perform temporal analysis with kernel algorithm: input or SHAP values not in expected format")
-        print(f"X_temporal_explain shape: {X_temporal_explain.shape}, shap_values shape: {shap_values.shape}")
-        has_3d_data = False
-
 # Generate temporal visualization if we have 3D data (either from gradient or reshaped kernel)
-if has_3d_data:
-    print("Generating temporal analysis plots...")
+print("Generating temporal analysis plots...")
 
-    # Calculate feature importance across time steps
-    batch_size, seq_len, n_features = shap_values_3d.shape
-    temporal_importance = np.abs(shap_values_3d).mean(axis=0)  # Shape: (seq_len, n_features)
-    print(f"Temporal importance shape: {temporal_importance.shape}, should be ({seq_len}, {n_features})")
+# Calculate feature importance across time steps
+batch_size, seq_len, n_features = shap_values_3d.shape
+temporal_importance = np.abs(shap_values_3d).mean(axis=0)  # Shape: (seq_len, n_features)
+print(f"Temporal importance shape: {temporal_importance.shape}, should be ({seq_len}, {n_features})")
 
-    # Create a plot showing feature importance across time steps
-    plt.figure(figsize=(12, 8))
+# Create a plot showing feature importance across time steps
+plt.figure(figsize=(12, 8))
 
-    # Create a heatmap of temporal importance
-    plt.imshow(temporal_importance.T, aspect='auto', cmap='viridis')
-    plt.colorbar(label='Mean |SHAP Value|')
+# Create a heatmap of temporal importance
+plt.imshow(temporal_importance.T, aspect='auto', cmap='viridis')
+plt.colorbar(label='Mean |SHAP Value|')
 
-    # Set axis labels and ticks
-    plt.xlabel('Time Steps (t-n)')
-    plt.ylabel('Features')
-    # X-axis ticks are time steps from past to present
-    time_labels = [f't-{seq_len-1-i}' for i in range(seq_len)]
-    plt.xticks(range(seq_len), time_labels, rotation=45)
-    # Y-axis ticks are feature names
-    plt.yticks(range(n_features), temporal_features)
+# Set axis labels and ticks
+plt.xlabel('Time Steps (t-n)')
+plt.ylabel('Features')
+# X-axis ticks are time steps from past to present
+time_labels = [f't-{seq_len-1-i}' for i in range(seq_len)]
+plt.xticks(range(seq_len), time_labels, rotation=45)
+# Y-axis ticks are feature names
+plt.yticks(range(n_features), temporal_features)
 
-    plt.title(f'{model_type.upper()} Temporal Feature Importance ({SHAP_ALGORITHM.capitalize()})')
-    plt.tight_layout()
+plt.title(f'{model_type.upper()} Temporal Feature Importance ({SHAP_ALGORITHM.capitalize()})')
+plt.tight_layout()
 
-    # Save the plot
-    temporal_plot_path = output_dir / f"{model_type}_{SHAP_ALGORITHM}_temporal_importance_{timestamp}.png"
-    plt.savefig(temporal_plot_path, dpi=300, bbox_inches='tight')
-    plt.show()
-    plt.close()
-    print(f"Temporal analysis plot saved to {temporal_plot_path}")
+# Save the plot
+temporal_plot_path = output_dir / f"{model_type}_{SHAP_ALGORITHM}_temporal_importance_{timestamp}.png"
+plt.savefig(temporal_plot_path, dpi=300, bbox_inches='tight')
+plt.show()
+plt.close()
+print(f"Temporal analysis plot saved to {temporal_plot_path}")
 
-    # Create line plots for top features across time
-    # Identify top N features based on overall importance
-    top_n = min(10, n_features)
-    # Calculate mean importance per feature across all time steps
-    feature_avg_importance = np.mean(temporal_importance, axis=0)  # Shape: (n_features,)
-    print(f"Feature average importance shape: {feature_avg_importance.shape}")
-    # Get indices of top N features by importance
-    top_features_idx = np.argsort(feature_avg_importance)[-top_n:]
-    print(f"Top {top_n} feature indices: {top_features_idx}")
+# Create line plots for top features across time
+# Identify top N features based on overall importance
+top_n = min(10, n_features)
+# Calculate mean importance per feature across all time steps
+feature_avg_importance = np.mean(temporal_importance, axis=0)  # Shape: (n_features,)
+print(f"Feature average importance shape: {feature_avg_importance.shape}")
+# Get indices of top N features by importance
+top_features_idx = np.argsort(feature_avg_importance)[-top_n:]
+print(f"Top {top_n} feature indices: {top_features_idx}")
 
-    plt.figure(figsize=(12, 6))
+plt.figure(figsize=(12, 6))
 
-    # Create x-axis values for plotting - using integers from 0 to seq_len-1
-    x_values = np.arange(seq_len)
+# Create x-axis values for plotting - using integers from 0 to seq_len-1
+x_values = np.arange(seq_len)
 
-    # Plot each top feature's importance over time
-    for i, feat_idx in enumerate(top_features_idx):
-        feat_name = temporal_features[feat_idx]
-        # Extract this feature's importance at each time step
-        importance_over_time = temporal_importance[:, feat_idx]
-        print(f"Feature '{feat_name}' importance shape: {importance_over_time.shape}")
-        # Plot this feature's line
-        plt.plot(x_values, importance_over_time, marker='o', linewidth=2, label=feat_name)
+# Plot each top feature's importance over time
+for i, feat_idx in enumerate(top_features_idx):
+    feat_name = temporal_features[feat_idx]
+    # Extract this feature's importance at each time step
+    importance_over_time = temporal_importance[:, feat_idx]
+    print(f"Feature '{feat_name}' importance shape: {importance_over_time.shape}")
+    # Plot this feature's line
+    plt.plot(x_values, importance_over_time, marker='o', linewidth=2, label=feat_name)
 
-    plt.xlabel('Time Step')
-    plt.ylabel('Feature Importance (Mean |SHAP Value|)')
-    plt.title(f'Top {top_n} Features Importance Across Time ({SHAP_ALGORITHM.capitalize()})')
-    plt.xticks(x_values, time_labels)
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
+plt.xlabel('Time Step')
+plt.ylabel('Feature Importance (Mean |SHAP Value|)')
+plt.title(f'Top {top_n} Features Importance Across Time ({SHAP_ALGORITHM.capitalize()})')
+plt.xticks(x_values, time_labels)
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
 
-    # Save the plot
-    top_features_path = output_dir / f"{model_type}_{SHAP_ALGORITHM}_top_features_temporal_{timestamp}.png"
-    plt.savefig(top_features_path, dpi=300, bbox_inches='tight')
-    plt.show()
-    plt.close()
-    print(f"Top features temporal analysis saved to {top_features_path}")
-else:
-    print("Skipping temporal analysis (requires 3D data structures)")
+# Save the plot
+top_features_path = output_dir / f"{model_type}_{SHAP_ALGORITHM}_top_features_temporal_{timestamp}.png"
+plt.savefig(top_features_path, dpi=300, bbox_inches='tight')
+plt.show()
+plt.close()
+print(f"Top features temporal analysis saved to {top_features_path}")
 
 # %% [markdown]
 # ### 7. Sensitivity Analysis (Alternative to SHAP Gradient)
+# This is a custom analysis that is not based on SHAP.
+# It is a simple sensitivity analysis that alters the values of input features and measures the impact on the prediction.
+# It treats each feature as a whole, not taking lookback window into account so we can have a plot of global feature importance.
 
 # %%
 print("--- Running Sensitivity Analysis ---")
-
+model.eval()
 # Initialize the sensitivity analyzer
-explainer = SensitivityAnalyzer(model, temporal_features, static_features)
+sa_explainer = SensitivityAnalyzer(model, temporal_features, static_features)
 
 # Analyze feature sensitivity
-sensitivity_df = explainer.analyze_feature_sensitivity(
+sensitivity_df = sa_explainer.analyze_feature_sensitivity(
     X_temporal_array,
     X_static_array,
     perturbation=0.1, # How much to perturb features
@@ -885,7 +892,7 @@ print("Sensitivity analysis complete.")
 
 # Plot feature sensitivity
 print("Generating feature sensitivity plot...")
-fig = explainer.plot_feature_sensitivity(
+fig = sa_explainer.plot_feature_sensitivity(
     sensitivity_df,
     max_display=50,
     show=False,
@@ -904,3 +911,4 @@ print(f"Sensitivity data saved to {sensitivity_csv_path}")
 print("Top 10 Features by Sensitivity:")
 print(sensitivity_df.head(10))
 
+# %%

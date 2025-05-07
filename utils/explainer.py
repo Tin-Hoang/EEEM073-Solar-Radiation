@@ -5,8 +5,8 @@ This module provides tools to explain model predictions using methods like:
 - SHAP (SHapley Additive exPlanations)
 - Sensitivity Analysis
 
-Author: [Your Name]
-Date: [Current Date]
+Author: Tin Hoang
+Date: 25-04-2025
 """
 
 import numpy as np
@@ -57,6 +57,9 @@ class PyTorchModelWrapper(torch.nn.Module):
         self.use_custom = use_custom
 
     def forward(self, x):
+        # Explicitly ensure model is in training mode for gradient computation
+        self.orig_model.train()
+
         if self.use_custom and self.custom_wrapper is not None:
             # Use the custom wrapper with return_pytorch_tensor=True
             outputs = self.custom_wrapper(x, return_pytorch_tensor=True)
