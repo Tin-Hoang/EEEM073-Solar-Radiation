@@ -29,7 +29,7 @@
 
 # %%
 # Debug mode to test code. Set to False for actual training
-DEBUG_MODE = False
+DEBUG_MODE = True
 
 # %% [markdown]
 # # 1. Data Loading
@@ -62,7 +62,7 @@ import matplotlib.dates as mdates
 # Local modules
 from utils.data_persistence import load_scalers
 from utils.plot_utils import plot_training_history, plot_evaluation_metrics
-from utils.training_utils import train_model, evaluate_model
+from utils.training_utils import train_model, evaluate_model, evaluate_inference_time
 from utils.wandb_utils import is_wandb_enabled, set_wandb_flag, set_keep_run_open
 from utils.model_utils import print_model_info, save_model
 
@@ -288,6 +288,13 @@ def run_experiment_pipeline(model, train_loader, val_loader, test_loader, model_
             device=device,
             debug_mode=DEBUG_MODE,
         )
+        # Evaluate inference time
+        timing_metrics = evaluate_inference_time(model,
+                                                 test_loader,
+                                                 model_name=f"{model_name} - Test",
+                                                 timing_iterations=3,
+                                                 debug_mode=DEBUG_MODE)
+        test_metrics.update(timing_metrics)
         test_plot = plot_evaluation_metrics(test_metrics, model_name=f"{model_name} - Test")
 
         # ========== Save Best Model Checkpoint ===========

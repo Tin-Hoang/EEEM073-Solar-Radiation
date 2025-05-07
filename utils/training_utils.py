@@ -196,9 +196,156 @@ def train_model(
     return history
 
 
+def evaluate_inference_time(model, data_loader, model_name="", log_to_wandb=True, device=default_device, debug_mode=False, timing_iterations=1, timing_warmup=True):
+    """
+    Evaluate a model's inference time on a dataset.
+
+    Args:
+        model: PyTorch model
+        data_loader: Data loader for evaluation
+        model_name: Name of the model for logging
+        log_to_wandb: Whether to log to wandb
+        device: Device to run the evaluation on
+        debug_mode: Whether to run in debug mode (only run 10 batches)
+        timing_iterations: Number of iterations to run for timing measurements (higher = more consistent)
+        timing_warmup: Whether to perform a warmup pass before timing (recommended for GPU)
+
+    Returns:
+        time_metrics: Dictionary of inference time metrics
+    """
+    model.eval()
+    total_inference_time = 0
+    total_samples = 0
+    batch_times = []
+
+    if debug_mode:
+        print("Debug mode is enabled for timing evaluation. Only running 10 batches.")
+
+    with torch.no_grad():
+        debug_counter = 0
+        # Add tqdm progress bar
+        eval_loop = tqdm(data_loader, desc=f"Timing {model_name}", leave=False)
+        for batch in eval_loop:
+            # Check for required fields
+            if 'temporal_features' not in batch or 'static_features' not in batch:
+                raise ValueError("Batch missing required fields: 'temporal_features', 'static_features'")
+
+            temporal_features = batch['temporal_features'].to(device)
+            static_features = batch['static_features'].to(device)
+            batch_size = temporal_features.size(0)
+            total_samples += batch_size
+
+            # Perform warm-up pass if requested and on first batch
+            if timing_warmup and device.type == 'cuda' and debug_counter == 0:
+                _ = model(temporal_features, static_features)
+                torch.cuda.synchronize()
+
+            # Measure inference time with multiple iterations
+            batch_inference_time = 0.0
+            for i in range(timing_iterations):
+                # Synchronize before timing if using CUDA
+                if device.type == 'cuda':
+                    torch.cuda.synchronize()
+
+                start_time = time.time()
+
+                # Run the model
+                _ = model(temporal_features, static_features)
+
+                # Synchronize after timing if using CUDA
+                if device.type == 'cuda':
+                    torch.cuda.synchronize()
+
+                end_time = time.time()
+                batch_inference_time += (end_time - start_time)
+
+            # Calculate average inference time for this batch
+            batch_inference_time /= timing_iterations
+            batch_times.append(batch_inference_time)
+            total_inference_time += batch_inference_time
+
+            # Update the progress bar with batch size and inference time
+            eval_loop.set_postfix(samples=batch_size, time_per_batch=f"{batch_inference_time:.4f}s")
+
+            debug_counter += 1
+            if debug_mode and debug_counter >= 10:
+                break
+
+    # Calculate inference speed metrics
+    if total_samples > 0:
+        avg_time_per_sample = total_inference_time / total_samples
+        samples_per_second = total_samples / total_inference_time
+    else:
+        avg_time_per_sample = float('nan')
+        samples_per_second = float('nan')
+
+    # Calculate statistics across all batches
+    batch_time_std = np.std(batch_times) if batch_times else float('nan')
+    batch_time_min = min(batch_times) if batch_times else float('nan')
+    batch_time_max = max(batch_times) if batch_times else float('nan')
+
+    # Create time metrics dictionary
+    time_metrics = {
+        'total_inference_time': total_inference_time,
+        'total_samples': total_samples,
+        'avg_time_per_sample': avg_time_per_sample,
+        'samples_per_second': samples_per_second,
+        'batch_time_std': batch_time_std,
+        'batch_time_min': batch_time_min,
+        'batch_time_max': batch_time_max,
+        'timing_iterations': timing_iterations,
+        'timing_warmup': timing_warmup
+    }
+
+    # Print timing metrics
+    print(f"\n{model_name} Timing Metrics:")
+    print(f"  Inference Speed: {samples_per_second:.2f} samples/sec, {avg_time_per_sample*1000000:.4f} μs/sample")
+    timing_info = f"  Total time: {total_inference_time:.4f} sec for {total_samples} samples"
+    if timing_iterations > 1:
+        timing_info += f" (averaged over {timing_iterations} iterations)"
+    print(timing_info)
+    print(f"  Batch time variation: min={batch_time_min:.4f}s, max={batch_time_max:.4f}s, std={batch_time_std:.4f}s")
+
+    # Log to wandb if enabled
+    if log_to_wandb and is_wandb_enabled():
+        # Determine prefix based on model name
+        eval_prefix = 'val/' if 'Validation' in model_name else 'test/' if 'Test' in model_name else ''
+
+        # Create a table with timing metrics
+        speed_table = wandb.Table(
+            columns=["Metric", "Value"],
+            data=[
+                ["Total Inference Time (s)", float(total_inference_time)],
+                ["Total Samples", int(total_samples)],
+                ["Avg Time per Sample (μs)", float(avg_time_per_sample * 1000000)],
+                ["Samples per Second", float(samples_per_second)],
+                ["Batch Time Std Dev (s)", float(batch_time_std)],
+                ["Min Batch Time (s)", float(batch_time_min)],
+                ["Max Batch Time (s)", float(batch_time_max)],
+                ["Timing Iterations", int(timing_iterations)],
+            ]
+        )
+
+        # Create a summary dictionary for key metrics
+        summary_metrics = {
+            f"{eval_prefix}inference_speed_samples_per_sec": samples_per_second,
+            f"{eval_prefix}inference_time_us_per_sample": avg_time_per_sample * 1000000,
+            f"{eval_prefix}timing_iterations": timing_iterations,
+            f"{eval_prefix}timing_warmup_enabled": int(timing_warmup)
+        }
+
+        # Log both the table and the summary metrics
+        wandb.log({
+            f"{eval_prefix}inference_speed_table": speed_table,
+            **summary_metrics
+        })
+
+    return time_metrics
+
+
 def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wandb=True, device=default_device, debug_mode=False):
     """
-    Evaluate a model on a dataset and compute metrics.
+    Evaluate a model on a dataset and compute accuracy metrics.
 
     Args:
         model: PyTorch model
@@ -210,17 +357,13 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
         debug_mode: Whether to run in debug mode (only run 10 batches)
 
     Returns:
-        metrics: Dictionary of evaluation metrics including inference speed
+        metrics: Dictionary of evaluation metrics (accuracy only, no timing information)
     """
     model.eval()
     all_outputs = []
     all_targets = []
     all_nighttime = []
     has_nighttime_data = False
-
-    # Track inference time
-    total_inference_time = 0
-    total_samples = 0
 
     if debug_mode:
         print("Debug mode is enabled for evaluation. Only running 10 batches.")
@@ -238,7 +381,6 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
             static_features = batch['static_features'].to(device)
             target = batch['target'].to(device)
             batch_size = temporal_features.size(0)
-            total_samples += batch_size
 
             # Ensure target has the right shape for broadcasting
             if len(target.shape) == 1 and target.shape[0] > 1:
@@ -275,18 +417,11 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
                             print(f"Warning: Nighttime shape {nighttime.shape} incompatible with target shape {target.shape}")
                             nighttime = torch.zeros_like(target.cpu())
             else:
-                print("No nighttime data found in batch")
                 # Create a placeholder (all zeros) for nighttime
                 nighttime = torch.zeros_like(target).cpu()
 
-            # Time the inference
-            start_time = time.time()
+            # Run the model
             output = model(temporal_features, static_features)
-            end_time = time.time()
-
-            # Calculate inference time for this batch
-            batch_inference_time = end_time - start_time
-            total_inference_time += batch_inference_time
 
             # Ensure shapes match for comparisons
             if output.shape != target.shape:
@@ -302,20 +437,12 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
             all_targets.append(target.cpu().numpy())
             all_nighttime.append(nighttime.cpu().numpy())
 
-            # Update the progress bar with batch size and inference time
-            eval_loop.set_postfix(samples=batch_size, time_per_batch=f"{batch_inference_time:.4f}s")
+            # Update the progress bar
+            eval_loop.set_postfix(samples=batch_size)
 
             debug_counter += 1
-            if debug_mode and debug_counter > 10:
+            if debug_mode and debug_counter >= 10:
                 break
-
-    # Calculate inference speed metrics
-    if total_samples > 0:
-        avg_time_per_sample = total_inference_time / total_samples
-        samples_per_second = total_samples / total_inference_time
-    else:
-        avg_time_per_sample = float('nan')
-        samples_per_second = float('nan')
 
     # Concatenate batches
     all_outputs = np.vstack(all_outputs)
@@ -407,16 +534,13 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
     else:
         night_mse = night_rmse = night_mae = night_r2 = night_mase = float('nan')
 
-    # Create evaluation metrics dictionary
+    # Create evaluation metrics dictionary - excluding all timing information
     metrics = {
         'mse': mse, 'rmse': rmse, 'mae': mae, 'r2': r2, 'mase': mase,
         'day_mse': day_mse, 'day_rmse': day_rmse, 'day_mae': day_mae, 'day_r2': day_r2, 'day_mase': day_mase,
         'night_mse': night_mse, 'night_rmse': night_rmse, 'night_mae': night_mae, 'night_r2': night_r2, 'night_mase': night_mase,
         'y_pred': y_pred_orig, 'y_true': y_true_orig, 'nighttime_mask': all_nighttime,
-        'total_inference_time': total_inference_time,
-        'total_samples': total_samples,
-        'avg_time_per_sample': avg_time_per_sample,
-        'samples_per_second': samples_per_second
+        'total_samples': len(y_true_orig)
     }
 
     # Print metrics
@@ -432,16 +556,12 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
     else:
         print("  Nighttime metrics: Not available (no nighttime data)")
 
-    # Print inference speed metrics
-    print(f"  Inference Speed: {samples_per_second:.2f} samples/sec, {avg_time_per_sample*1000000:.4f} μs/sample")
-    print(f"  Total time: {total_inference_time:.4f} sec for {total_samples} samples")
-
     # Log to wandb if enabled
     if log_to_wandb and is_wandb_enabled():
-        # Create a metrics table instead of logging as timeseries
+        # Determine appropriate prefix for metrics
         eval_prefix = 'val/' if 'Validation' in model_name else 'test/' if 'Test' in model_name else ''
 
-        # Create a table with metrics
+        # Create a metrics table
         metrics_table = wandb.Table(
             columns=["Metric", "Overall", "Daytime", "Nighttime"],
             data=[
@@ -453,17 +573,6 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
             ]
         )
 
-        # Create inference speed metrics table
-        speed_table = wandb.Table(
-            columns=["Metric", "Value"],
-            data=[
-                ["Total Inference Time (s)", float(total_inference_time)],
-                ["Total Samples", int(total_samples)],
-                ["Avg Time per Sample (μs)", float(avg_time_per_sample * 1000000)],
-                ["Samples per Second", float(samples_per_second)],
-            ]
-        )
-
         # Create a summary dictionary for key metrics
         summary_metrics = {
             f"{eval_prefix}mse": mse,
@@ -471,8 +580,6 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
             f"{eval_prefix}mae": mae,
             f"{eval_prefix}mase": mase,
             f"{eval_prefix}r2": r2,
-            f"{eval_prefix}inference_speed_samples_per_sec": samples_per_second,
-            f"{eval_prefix}inference_time_us_per_sample": avg_time_per_sample * 1000000
         }
 
         # Create a sample predictions table
@@ -507,7 +614,6 @@ def evaluate_model(model, data_loader, target_scaler, model_name="", log_to_wand
         # Log both the tables and the summary metrics
         wandb.log({
             f"{eval_prefix}metrics_table": metrics_table,
-            f"{eval_prefix}inference_speed_table": speed_table,
             f"{eval_prefix}predictions_sample": pred_table,
             **summary_metrics
         })
