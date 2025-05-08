@@ -3,53 +3,33 @@
 #
 # This notebook implements deep learning models to forecast Global Horizontal Irradiance (GHI) based on various input features. The notebook is structured as follows:
 #
-# 1. **Data Loading and Exploration**: Load the pre-split train/validation/test datasets and explore their structure
-# 2. **Data Preprocessing**: Prepare the data for model training (normalization, feature engineering)
+# 1. Load raw data (downloaded from the notebook 1_data_exploration_and_download.py)
+# 2. Preprocess the data to create time features, nighttime mask, clear sky GHI baseline and normalize the data
+# 3. Save the normalized data and the scalers for later steps
+
 
 # %% [markdown]
 # ## 1. Setup and Data Loading
 #
-# First, let's import the necessary libraries and load the data.
+# Define data loading parameters
 
 # %%
 # Import required libraries
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
 import h5py
-import os
 import datetime
 from pathlib import Path
-from tqdm.notebook import tqdm
-
-# PyTorch libraries
-import torch
-
-# Set random seeds for reproducibility
-np.random.seed(42)
-torch.manual_seed(42)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(42)
-
-# Set device to GPU if available, otherwise use CPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using {device} device")
-
-
-
-# %%
-# Define data loading parameters
 
 # Find all data files
 train_files = [
     "data/raw/himawari7_2011_Hồ-Chí-Minh.h5",
-    # "data/raw/himawari7_2012_Hồ-Chí-Minh.h5",
-    # "data/raw/himawari7_2013_Hồ-Chí-Minh.h5",
-    # "data/raw/himawari7_2014_Hồ-Chí-Minh.h5",
-    # "data/raw/himawari7_2015_Hồ-Chí-Minh.h5",
-    # "data/raw/himawari7_2016_Hồ-Chí-Minh.h5",
-    # "data/raw/himawari7_2017_Hồ-Chí-Minh.h5",
-    # "data/raw/himawari7_2018_Hồ-Chí-Minh.h5",
+    "data/raw/himawari7_2012_Hồ-Chí-Minh.h5",
+    "data/raw/himawari7_2013_Hồ-Chí-Minh.h5",
+    "data/raw/himawari7_2014_Hồ-Chí-Minh.h5",
+    "data/raw/himawari7_2015_Hồ-Chí-Minh.h5",
+    "data/raw/himawari7_2016_Hồ-Chí-Minh.h5",
+    "data/raw/himawari7_2017_Hồ-Chí-Minh.h5",
+    "data/raw/himawari7_2018_Hồ-Chí-Minh.h5",
 ]
 val_files = [
     "data/raw/himawari7_2019_Hồ-Chí-Minh.h5",
@@ -166,7 +146,7 @@ if test_files:
 
 # %% [markdown]
 # ### 1.2 Raw Data Loading
-#
+# Load the raw data with selected features.
 
 # %%
 from utils.data_loading_utils import load_dataset
@@ -179,9 +159,9 @@ val_data = load_dataset(val_files, n_sites=None, features=SELECTED_FEATURES, tar
 print("\nLoading test data...")
 test_data = load_dataset(test_files, n_sites=None, features=SELECTED_FEATURES, target_variable="ghi", apply_scaling=True, time_interval="1h")
 
-
 # %% [markdown]
 # ### 1.3 Visualize the Data
+# Plot the data for a location to check the data quality.
 
 # %%
 from utils.plot_utils import plot_time_series
@@ -196,9 +176,22 @@ fig = plot_time_series(train_data,
 
 # %% [markdown]
 # ## 2. Data Preprocessing
+#
+# Preprocess the data to create time features and normalize the data.
 
 # %% [markdown]
 # ### 2.1 Time Feature Engineering
+# Convert the timestamps to frequency-based time features.
+#
+# The output time features are:
+# - `hour_sin`: Sine of the hour of the day
+# - `hour_cos`: Cosine of the hour of the day
+# - `day_sin`: Sine of the day of the year
+# - `day_cos`: Cosine of the day of the year
+# - `month_sin`: Sine of the month of the year
+# - `month_cos`: Cosine of the month of the year
+# - `dow_sin`: Sine of the day of the week
+# - `dow_cos`: Cosine of the day of the week
 
 # %%
 from utils.normalize_utils import create_time_features
@@ -218,6 +211,7 @@ for key, value in train_time_features_dict.items():
 
 
 # %%
+# Plot the time features for a few days to check
 from utils.plot_utils import plot_time_features
 
 _ = plot_time_features(train_data['timestamps'], train_time_features_dict, n_days=14)
@@ -225,6 +219,12 @@ _ = plot_time_features(train_data['timestamps'], train_time_features_dict, n_day
 
 # %% [markdown]
 # ### 2.2 Create nighttime mask feature
+#
+# Create a nighttime mask to indicate the nighttime hours.
+# The nighttime mask is computed using the solar zenith angle.
+#
+# The output nighttime mask is:
+# - `nighttime_mask`: 1 for nighttime, 0 for daytime
 
 # %%
 from utils.features_utils import compute_nighttime_mask
@@ -258,7 +258,12 @@ _ = plot_solar_day_night(train_data, location_idx=0, n_steps=48, start_idx=0)
 
 
 # %% [markdown]
-# ### 2.3 Create Clear Sky model (if not provided)
+# ### 2.3 Create Clear Sky GHI baseline (if not provided)
+#
+# Create a clear sky GHI baseline based on the solar zenith angle if `clearsky_ghi` is not provided, e.g. for old data from vietnam2016.h5 or old satellite data.
+#
+# The output clear sky GHI is:
+# - `clearsky_ghi`: Clear sky GHI
 
 # %%
 from utils.features_utils import compute_clearsky_ghi
@@ -287,6 +292,7 @@ if "clearsky_ghi" not in SELECTED_FEATURES:
 
 
 # %%
+# Plot the clear sky GHI and the actual GHI for a few days to check
 from utils.plot_utils import plot_time_series
 
 # Plot data for a few locations
@@ -299,6 +305,12 @@ fig = plot_time_series(train_data,
 
 # %% [markdown]
 # ### 2.4 Data Normalization
+#
+# Normalize the data to have zero mean and unit variance.
+#
+# The output normalized data is:
+# - `normalized_data`: Normalized data
+# - `scalers`: Scalers used for normalization
 
 # %%
 from utils.normalize_utils import normalize_data
@@ -313,6 +325,11 @@ print("Normalized data shapes:")
 for key in norm_train_data:
     if isinstance(norm_train_data[key], np.ndarray):
         print(f"  {key}: {norm_train_data[key].shape}")
+
+# %% [markdown]
+# ### 2.5 Save the Normalized Data
+#
+# Save the normalized data and the scalers for later steps.
 
 # %%
 from utils.data_persistence import save_normalized_data, save_scalers
