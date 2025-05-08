@@ -1,7 +1,7 @@
 """
 Mamba model for time series forecasting with temporal and static features.
 
-This model is based on the Mamba architecture, which is a variant of the Transformer architecture.
+This model is based on the Mamba architecture, which is a variant of the State Space Model.
 It uses a selective scan operation with data-dependent parameters to process the input sequence.
 - Source: https://github.com/state-spaces/mamba
 
@@ -134,7 +134,7 @@ class SelectiveSSM(nn.Module):
 
 class MambaBlock(nn.Module):
     """
-    Mamba Block - similar to a Transformer block but using SSM instead of attention
+    Mamba Block - the core building block of the Mamba model.
     """
     def __init__(
         self,
