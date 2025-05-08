@@ -1,10 +1,6 @@
 h5py==3.13.0
 matplotlib==3.10.1
 numpy==2.2.5
-onnx==1.17.0
-onnxconverter_common==1.14.0
-onnxruntime==1.21.1
-onnxruntime_gpu==1.21.1
 pandas==2.2.3
 pvlib==0.12.0
 pytorch_tsmixer==0.2.0
@@ -15,3 +11,10 @@ shap==0.47.2
 torch==2.6.0
 torchinfo==1.8.0
 tqdm==4.67.1
+wandb==0.19.9
+NREL-rex==0.3.2
+h5pyd==0.21.0
+onnx==1.17.0
+onnxconverter_common==1.14.0
+onnxruntime==1.21.1
+onnxruntime_gpu==1.21.1
