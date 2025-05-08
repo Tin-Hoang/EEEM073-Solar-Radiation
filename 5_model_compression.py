@@ -1,13 +1,13 @@
 # %% [markdown]
-# # Model Efficiency Experiment (targeted: Transformer)
+# # Model Compression Experiment (example on: Transformer)
 #
-# This notebook implements various model efficiency techniques for the Transformer model used in solar radiation forecasting:
-#
+# This notebook implements various model compression techniques for the Transformer model (*) used in solar radiation forecasting:
 # 1. **Quantization**: Reducing model precision to decrease size and improve inference speed
 # 2. **Structured Pruning**: Removing less important components to reduce parameters
 # 3. **Knowledge Distillation**: Training a smaller model to mimic the larger model's behavior
 #
-# These techniques help make models more energy-efficient and computationally efficient, which is crucial for sustainability in AI applications.
+# (*) This notebook is tested on Transformer model, but you can choose other model (e.g. Informer, iTransformer, etc.) checkpoint as well.
+# Just note to update the student model arguments in Technique 3 if you choose other model.
 
 
 # %% [markdown]
@@ -37,7 +37,6 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn
-import torch.nn.utils.prune as prune
 from torch.utils.data import DataLoader
 import copy
 from tqdm import tqdm
@@ -49,9 +48,8 @@ from utils.model_utils import load_model, save_model, print_model_info
 from utils.data_persistence import load_scalers
 from utils.plot_utils import plot_predictions_over_time
 from utils.timeseriesdataset import TimeSeriesDataset
-from utils.training_utils import evaluate_model
+from utils.training_utils import evaluate_model, evaluate_inference_time
 from utils.wandb_utils import track_experiment, is_wandb_enabled
-from models.transformer import TransformerModel
 
 # For reproducibility
 torch.manual_seed(42)
@@ -63,16 +61,14 @@ if torch.cuda.is_available():
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
-# Model efficiency experiment configuration
+# Choose the model checkpoint from the previous experiment
+PRETRAINED_MODEL_PATH = "checkpoints/Transformer_best_20250507_184033.pt"
 
 # Data settings
 TRAIN_PREPROCESSED_DATA_PATH = "data/processed/train_normalized_20250430_145157.h5"
 VAL_PREPROCESSED_DATA_PATH = "data/processed/val_normalized_20250430_145205.h5"
 TEST_PREPROCESSED_DATA_PATH = "data/processed/test_normalized_20250430_145205.h5"
 SCALER_PATH = "data/processed/scalers_20250430_145206.pkl"
-# Choose the model checkpoint from the previous experiment
-# PRETRAINED_MODEL_PATH = "checkpoints/MLP_best_20250504_052621.pt"
-PRETRAINED_MODEL_PATH = "checkpoints/Transformer_best_20250505_060532.pt"
 
 # Dataset settings
 LOOKBACK = 24
@@ -118,6 +114,15 @@ def print_model_report(model_name, model, test_loader, scalers, device=device):
         device=device,
         debug_mode=DEBUG_MODE
     )
+    # Evaluate inference time
+    timing_metrics = evaluate_inference_time(model,
+                                             test_loader,
+                                             model_name=f"{model_name} - Test",
+                                             log_to_wandb=False,
+                                             timing_iterations=3,
+                                             device=device,
+                                             debug_mode=DEBUG_MODE)
+    eval_metrics.update(timing_metrics)
     # Get inference time from the evaluation metrics
     inference_time = eval_metrics['total_inference_time']
 
@@ -144,8 +149,6 @@ def print_model_report(model_name, model, test_loader, scalers, device=device):
 
 # %% [markdown]
 # ## Load and Prepare Data
-#
-# Use the project's data loading utilities to load the preprocessed data.
 
 # %%
 # Load scalers
@@ -179,8 +182,6 @@ print("Data loading successful.")
 
 # %% [markdown]
 # ## Load Original Model
-#
-# Use the project's model loading utility to load the pretrained model.
 
 # %%
 
@@ -238,7 +239,11 @@ plt.show()
 #
 # Quantization reduces model precision from float32 to int8 to decrease model size and improve inference speed.
 #
-# The quantization in this section is done on the CPU with ONNX Runtime.
+# The quantization in this section is done with ONNX Runtime on CPU (section 1a and 1b) and GPU (section 1c).
+#
+# Require libraries:
+# - onnx
+# - onnxruntime
 
 # %% [markdown]
 # ## Technique 1a: Int8 Quantization with ONNX (CPU)
@@ -328,7 +333,7 @@ print(f"Quantized ONNX model size: {quant_onnx_size:.2f} MB")
 print()
 
 # Helper function to evaluate ONNX models over the full test set
-def evaluate_onnx_model(model_path):
+def evaluate_onnx_model(model_path, debug_mode=False):
     sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
     input_name1 = sess.get_inputs()[0].name
     input_name2 = sess.get_inputs()[1].name
@@ -343,6 +348,7 @@ def evaluate_onnx_model(model_path):
     num_batches = 0
     all_preds = []
     all_targets = []
+    debug_counter = 0
     for batch in tqdm(test_loader, desc=f"ONNX inference ({os.path.basename(model_path)})"):
         inp1 = batch['temporal_features'].numpy()
         inp2 = batch['static_features'].numpy()
@@ -354,6 +360,10 @@ def evaluate_onnx_model(model_path):
         num_batches += 1
         all_preds.append(outputs)
         all_targets.append(targets)
+
+        debug_counter += 1
+        if debug_mode and debug_counter > 10:
+            break
     avg_time = total_time / num_batches if num_batches > 0 else 0.0
     # Concatenate and inverse-transform
     preds = np.concatenate(all_preds, axis=0)
@@ -371,8 +381,8 @@ def evaluate_onnx_model(model_path):
 
 # Technique 1a: ONNX CPU Quantization Results
 print("\n===== Technique 1a: ONNX CPU Quantization Results =====")
-onnx_orig_metrics = evaluate_onnx_model(onnx_model_path)
-onnx_int8_metrics = evaluate_onnx_model(quantized_onnx_model_path)
+onnx_orig_metrics = evaluate_onnx_model(onnx_model_path, debug_mode=DEBUG_MODE)
+onnx_int8_metrics = evaluate_onnx_model(quantized_onnx_model_path, debug_mode=DEBUG_MODE)
 print(f"{'Model':<30}{'Size (MB)':<12}{'Latency(ms)':<15}{'MAE':<10}")
 print('-'*67)
 print(f"{'Original ONNX CPU':<30}{onnx_orig_metrics['size']:<12.2f}{onnx_orig_metrics['inference_time']*1000:<15.2f}{onnx_orig_metrics['mae']:<10.4f}")
@@ -438,7 +448,7 @@ print(f"Size reduction: {(orig_onnx_size - quant_int4_size) / orig_onnx_size * 1
 
 # Evaluate Int4 model
 print("\nEvaluating Int4 quantized model on CPU...")
-onnx_int4_metrics = evaluate_onnx_model(model_int4_path)
+onnx_int4_metrics = evaluate_onnx_model(model_int4_path, debug_mode=DEBUG_MODE)
 
 # Add to our comparison table
 print("\n===== Int4 Quantization Results =====")
@@ -460,7 +470,7 @@ print()
 
 # %%
 # Helper function to evaluate ONNX models on GPU
-def evaluate_onnx_model_gpu(model_path, provider='CUDAExecutionProvider', fp16_mode=False):
+def evaluate_onnx_model_gpu(model_path, provider='CUDAExecutionProvider', fp16_mode=False, debug_mode=False):
     # Configure session options to optimize for GPU
     sess_options = ort.SessionOptions()
     sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -501,7 +511,7 @@ def evaluate_onnx_model_gpu(model_path, provider='CUDAExecutionProvider', fp16_m
     num_batches = 0
     all_preds = []
     all_targets = []
-
+    debug_counter = 0
     for batch in tqdm(test_loader, desc=f"GPU ONNX inference ({os.path.basename(model_path)})"):
         inp1 = batch['temporal_features'].numpy()
         inp2 = batch['static_features'].numpy()
@@ -529,6 +539,10 @@ def evaluate_onnx_model_gpu(model_path, provider='CUDAExecutionProvider', fp16_m
 
         all_preds.append(outputs)
         all_targets.append(targets)
+
+        debug_counter += 1
+        if debug_mode and debug_counter > 10:
+            break
 
     avg_time = total_time / num_batches if num_batches > 0 else 0.0
 
@@ -574,11 +588,11 @@ onnx.save(model_fp16, quantized_fp16_path)
 
 # First evaluate the original model on GPU for baseline comparison
 print("\nEvaluating original (FP32) ONNX model on GPU...")
-onnx_gpu_metrics = evaluate_onnx_model_gpu(onnx_model_path, fp16_mode=False)
+onnx_gpu_metrics = evaluate_onnx_model_gpu(onnx_model_path, fp16_mode=False, debug_mode=DEBUG_MODE)
 
 # Evaluate the FP16 model on GPU
 print("\nEvaluating FP16 quantized model on GPU...")
-onnx_fp16_metrics = evaluate_onnx_model_gpu(quantized_fp16_path, fp16_mode=True)
+onnx_fp16_metrics = evaluate_onnx_model_gpu(quantized_fp16_path, fp16_mode=True, debug_mode=DEBUG_MODE)
 
 # Technique 1b: ONNX GPU Quantization Results (FP32 vs FP16 vs INT8)
 print("\n===== Technique 1b: ONNX GPU Quantization Results =====")
@@ -598,6 +612,8 @@ print()
 
 # %%
 print("\n===== Technique 2: Structured Pruning =====")
+
+import torch.nn.utils.prune as prune
 
 # Apply structured pruning to the transformer model using PyTorch's pruning utilities
 def apply_structured_pruning(model, amount=0.3):
@@ -726,6 +742,7 @@ all_models = [original_metrics, best_pruned_model]
 # 1. Create a smaller student model based on the original model architecture
 # 2. Train the student model with knowledge distillation from the teacher model
 # 3. Evaluate the student model
+# 4. Additionally, train the same student model architecture without distillation for comparison
 
 # %% [markdown]
 # ### Settings for Distillation Training
@@ -752,10 +769,10 @@ set_wandb_flag(USE_WANDB)
 set_keep_run_open(True)
 if is_wandb_enabled():
     wandb.finish()
-# Student model settings (should be lower than the original model)
+# tudent model settings (should be lower than the original model)
 STUDENT_D_MODEL = 128
 STUDENT_N_HEADS = 2
-STUDENT_E_LAYERS = 1
+STUDENT_E_LAYERS = 2
 STUDENT_D_FF = 128
 # ======================================================
 
@@ -777,24 +794,78 @@ metadata = {
 
 # Define distillation loss - combines task loss with matching teacher outputs
 class DistillationLoss(nn.Module):
-    def __init__(self, alpha=0.5, temperature=2.0):
+    """
+    Distillation loss combining task loss with teacher-student matching loss.
+    Supports multiple loss functions (MSE, MAE, Huber) and optional normalization.
+    """
+    def __init__(
+        self,
+        alpha=0.5,
+        temperature=1.0,
+        loss_type="mse",
+        normalize_outputs=False,
+        huber_delta=1.0
+    ):
         """
         Args:
-            alpha: Weight for the distillation loss (0-1)
-            temperature: Temperature for softening the teacher's predictions
+            alpha (float): Weight for distillation loss (0-1).
+            temperature (float): Temperature for softening outputs (set to 1.0 for regression).
+            loss_type (str): Type of distillation loss ("mse", "mae", "huber").
+            normalize_outputs (bool): If True, normalize outputs to zero mean and unit variance.
+            huber_delta (float): Delta parameter for Huber loss.
         """
         super().__init__()
         self.alpha = alpha
         self.temperature = temperature
-        self.mse_loss = nn.MSELoss()
+        self.normalize_outputs = normalize_outputs
+        self.huber_delta = huber_delta
+
+        if loss_type == "mse":
+            self.task_loss_fn = nn.MSELoss()
+            self.distill_loss_fn = nn.MSELoss()
+        elif loss_type == "mae":
+            self.task_loss_fn = nn.L1Loss()
+            self.distill_loss_fn = nn.L1Loss()
+        elif loss_type == "huber":
+            self.task_loss_fn = nn.SmoothL1Loss(beta=huber_delta)
+            self.distill_loss_fn = nn.SmoothL1Loss(beta=huber_delta)
+        else:
+            raise ValueError(f"Unsupported loss_type: {loss_type}. Choose 'mse', 'mae', or 'huber'.")
+
+    def _normalize(self, x):
+        """Normalize tensor to zero mean and unit variance."""
+        if not self.normalize_outputs:
+            return x
+        mean = x.mean(dim=-1, keepdim=True)
+        std = x.std(dim=-1, keepdim=True) + 1e-6  # Avoid division by zero
+        return (x - mean) / std
 
     def forward(self, student_outputs, teacher_outputs, targets):
-        # Task loss - direct prediction loss
-        task_loss = self.mse_loss(student_outputs, targets)
+        """
+        Args:
+            student_outputs (torch.Tensor): Student predictions [batch_size,].
+            teacher_outputs (torch.Tensor): Teacher predictions [batch_size,].
+            targets (torch.Tensor): Ground truth values [batch_size,].
 
-        # Distillation loss - match the teacher's predictions
-        # For regression task, we use MSE between student and teacher outputs
-        distill_loss = self.mse_loss(student_outputs, teacher_outputs)
+        Returns:
+            tuple: (total_loss, task_loss, distill_loss)
+        """
+        # Validate shapes
+        assert student_outputs.shape == teacher_outputs.shape == targets.shape, \
+            f"Shape mismatch: student={student_outputs.shape}, teacher={teacher_outputs.shape}, targets={targets.shape}"
+
+        # Normalize outputs if enabled
+        student_outputs = self._normalize(student_outputs)
+        teacher_outputs = self._normalize(teacher_outputs)
+        targets = self._normalize(targets)
+
+        # Task loss
+        task_loss = self.task_loss_fn(student_outputs, targets)
+
+        # Distillation loss with temperature scaling
+        student_soft = student_outputs / self.temperature
+        teacher_soft = teacher_outputs / self.temperature
+        distill_loss = self.distill_loss_fn(student_soft, teacher_soft) * (self.temperature ** 2)
 
         # Combined loss
         loss = (1 - self.alpha) * task_loss + self.alpha * distill_loss
@@ -806,6 +877,8 @@ def create_student_model(original_model, d_model=STUDENT_D_MODEL, n_heads=STUDEN
     """
     Creates a smaller student model with reduced parameters
     """
+    from models.transformer import TransformerModel
+
     print(f"Creating student model with d_model={d_model}, n_heads={n_heads}, e_layers={e_layers}")
 
     # Use the TransformerModel with smaller parameters
@@ -822,21 +895,19 @@ def create_student_model(original_model, d_model=STUDENT_D_MODEL, n_heads=STUDEN
 # Training function for distillation
 @track_experiment
 def train_with_distillation(teacher_model, student_model, train_loader, val_loader,
-                          criterion, optimizer, scheduler=None,
-                          epochs=EPOCHS, device=device, patience=PATIENCE,
+                          criterion, epochs=EPOCHS, device=device,
+                          patience=PATIENCE, lr=0.001,
                           debug_mode=DEBUG_MODE, model_name="DistilledModel",
-                          target_scaler=None, config=None):
+                          target_scaler=None, config=None, use_distillation=True):
     """
-    Train the student model with knowledge distillation from the teacher
+    Train the student model with or without knowledge distillation from the teacher
 
     Args:
         teacher_model: Teacher model for knowledge distillation
         student_model: Student model to be trained
         train_loader: Training data loader
         val_loader: Validation data loader
-        criterion: Loss function for distillation
-        optimizer: Optimizer for training
-        scheduler: Learning rate scheduler (optional)
+        criterion: Loss function for distillation (DistillationLoss) or standard criterion (nn.MSELoss)
         epochs: Maximum number of epochs
         device: Device to train on
         patience: Early stopping patience
@@ -844,6 +915,7 @@ def train_with_distillation(teacher_model, student_model, train_loader, val_load
         model_name: Name of the model for logging
         target_scaler: Scaler for the target variable
         config: Configuration dictionary
+        use_distillation: Whether to use knowledge distillation (if False, only use task loss)
 
     Returns:
         student_model: Trained student model
@@ -852,8 +924,16 @@ def train_with_distillation(teacher_model, student_model, train_loader, val_load
     # Ensure models are on the correct device
     teacher_model = teacher_model.to(device)
     student_model = student_model.to(device)
+    # Configure optimizer and scheduler
+    optimizer = torch.optim.AdamW(student_model.parameters(), lr=lr, weight_decay=0.01)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=2, verbose=True
+    )
 
-    teacher_model.eval()  # Teacher model is only used for inference
+    # For non-distillation training, we use a simple MSE loss
+    mse_criterion = nn.MSELoss()
+
+    teacher_model.eval()  # Teacher model is only used for inference when distillation is enabled
     student_model.train()
 
     best_val_loss = float('inf')
@@ -879,16 +959,22 @@ def train_with_distillation(teacher_model, student_model, train_loader, val_load
             targets = batch['target'].to(device)
             train_samples += targets.size(0)
 
-            # Forward pass through teacher model (no grad needed)
-            with torch.no_grad():
-                teacher_outputs = teacher_model(temporal_features, static_features)
-
             # Forward pass through student model
             optimizer.zero_grad()
             student_outputs = student_model(temporal_features, static_features)
 
-            # Calculate loss
-            loss, task_loss, distill_loss = criterion(student_outputs, teacher_outputs, targets)
+            if use_distillation:
+                # Forward pass through teacher model (no grad needed)
+                with torch.no_grad():
+                    teacher_outputs = teacher_model(temporal_features, static_features)
+
+                # Calculate loss with distillation
+                loss, task_loss, distill_loss = criterion(student_outputs, teacher_outputs, targets)
+            else:
+                # Calculate loss without distillation (standard training)
+                loss = mse_criterion(student_outputs, targets)
+                task_loss = loss
+                distill_loss = torch.tensor(0.0, device=device)  # Zero distillation loss
 
             # Backward pass and optimize
             loss.backward()
@@ -897,14 +983,20 @@ def train_with_distillation(teacher_model, student_model, train_loader, val_load
             # Log losses
             train_losses.append(loss.item())
             task_losses.append(task_loss.item())
-            distill_losses.append(distill_loss.item())
+            if use_distillation:
+                distill_losses.append(distill_loss.item())
 
             # Update progress bar
-            pbar.set_postfix({
-                'loss': f"{loss.item():.4f}",
-                'task_loss': f"{task_loss.item():.4f}",
-                'distill_loss': f"{distill_loss.item():.4f}"
-            })
+            if use_distillation:
+                pbar.set_postfix({
+                    'loss': f"{loss.item():.4f}",
+                    'task_loss': f"{task_loss.item():.4f}",
+                    'distill_loss': f"{distill_loss.item():.4f}"
+                })
+            else:
+                pbar.set_postfix({
+                    'loss': f"{loss.item():.4f}"
+                })
 
         # Validation phase
         student_model.eval()
@@ -927,14 +1019,20 @@ def train_with_distillation(teacher_model, student_model, train_loader, val_load
                 val_samples += targets.size(0)
 
                 # Forward pass
-                teacher_outputs = teacher_model(temporal_features, static_features)
                 student_outputs = student_model(temporal_features, static_features)
 
-                # Calculate loss
-                loss, task_loss, distill_loss = criterion(student_outputs, teacher_outputs, targets)
+                if use_distillation:
+                    teacher_outputs = teacher_model(temporal_features, static_features)
+                    # Calculate loss with distillation
+                    loss, task_loss, distill_loss = criterion(student_outputs, teacher_outputs, targets)
+                    val_distill_losses.append(distill_loss.item())
+                else:
+                    # Calculate loss without distillation
+                    loss = mse_criterion(student_outputs, targets)
+                    task_loss = loss
+
                 val_losses.append(loss.item())
                 val_task_losses.append(task_loss.item())
-                val_distill_losses.append(distill_loss.item())
 
                 # Store predictions and targets for MAE calculation - reshape to ensure consistent dimensions
                 student_preds.append(student_outputs.cpu().numpy().flatten())
@@ -943,11 +1041,11 @@ def train_with_distillation(teacher_model, student_model, train_loader, val_load
         # Calculate average losses
         avg_train_loss = sum(train_losses) / len(train_losses) if train_losses else 0
         avg_task_loss = sum(task_losses) / len(task_losses) if task_losses else 0
-        avg_distill_loss = sum(distill_losses) / len(distill_losses) if distill_losses else 0
+        avg_distill_loss = sum(distill_losses) / len(distill_losses) if distill_losses and use_distillation else 0
 
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
         avg_val_task_loss = sum(val_task_losses) / len(val_task_losses) if val_task_losses else 0
-        avg_val_distill_loss = sum(val_distill_losses) / len(val_distill_losses) if val_distill_losses else 0
+        avg_val_distill_loss = sum(val_distill_losses) / len(val_distill_losses) if val_distill_losses and use_distillation else 0
 
         # Calculate MAE if we have target_scaler
         student_preds_concat = np.concatenate(student_preds)
@@ -960,12 +1058,18 @@ def train_with_distillation(teacher_model, student_model, train_loader, val_load
         else:
             val_mae = mean_absolute_error(val_targets_concat, student_preds_concat)
 
-        print(f"Epoch {epoch+1}/{epochs} - "
-              f"Train Loss: {avg_train_loss:.4f} "
-              f"(Task: {avg_task_loss:.4f}, Distill: {avg_distill_loss:.4f}) - "
-              f"Val Loss: {avg_val_loss:.4f} "
-              f"(Task: {avg_val_task_loss:.4f}, Distill: {avg_val_distill_loss:.4f}) - "
-              f"Val MAE: {val_mae:.4f}")
+        if use_distillation:
+            print(f"Epoch {epoch+1}/{epochs} - "
+                f"Train Loss: {avg_train_loss:.4f} "
+                f"(Task: {avg_task_loss:.4f}, Distill: {avg_distill_loss:.4f}) - "
+                f"Val Loss: {avg_val_loss:.4f} "
+                f"(Task: {avg_val_task_loss:.4f}, Distill: {avg_val_distill_loss:.4f}) - "
+                f"Val MAE: {val_mae:.4f}")
+        else:
+            print(f"Epoch {epoch+1}/{epochs} - "
+                f"Train Loss: {avg_train_loss:.4f} - "
+                f"Val Loss: {avg_val_loss:.4f} - "
+                f"Val MAE: {val_mae:.4f}")
 
         # Learning rate scheduler step
         if scheduler is not None:
@@ -977,14 +1081,20 @@ def train_with_distillation(teacher_model, student_model, train_loader, val_load
                 'train/epoch': epoch,
                 'train/loss': avg_train_loss,
                 'train/task_loss': avg_task_loss,
-                'train/distill_loss': avg_distill_loss,
                 'train/learning_rate': optimizer.param_groups[0]['lr'],
                 'val/epoch': epoch,
                 'val/loss': avg_val_loss,
                 'val/task_loss': avg_val_task_loss,
-                'val/distill_loss': avg_val_distill_loss,
                 'val/mae': val_mae,
             }
+
+            # Add distillation metrics if using distillation
+            if use_distillation:
+                log_dict.update({
+                    'train/distill_loss': avg_distill_loss,
+                    'val/distill_loss': avg_val_distill_loss,
+                })
+
             wandb.log(log_dict)
 
         # Early stopping
@@ -1022,10 +1132,11 @@ print_model_info(student_model, temporal_shape=sample_input[0].shape,
                 static_shape=sample_input[1].shape)
 
 # Configure distillation training
-distillation_loss = DistillationLoss(alpha=0.5, temperature=2.0)
-optimizer = torch.optim.Adam(student_model.parameters(), lr=LR)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.5, patience=2, verbose=True
+distillation_loss = DistillationLoss(
+    alpha=0.6,
+    temperature=1.0,  # Set to 1.0 to disable temperature scaling for regression task
+    loss_type="mse",
+    normalize_outputs=False,
 )
 
 # Train student model with distillation
@@ -1038,14 +1149,13 @@ student_model, best_val_loss = train_with_distillation(
     train_loader=train_loader,
     val_loader=val_loader,
     criterion=distillation_loss,
-    optimizer=optimizer,
-    scheduler=scheduler,
     epochs=EPOCHS,
     patience=PATIENCE,
     debug_mode=DEBUG_MODE,
     model_name=f"{model_name}_student",
     target_scaler=target_scaler,
-    config=CONFIG
+    config=CONFIG,
+    use_distillation=True
 )
 
 # Save the trained student model
@@ -1057,27 +1167,77 @@ print(f"Saved student model to {student_model_path}")
 # Evaluate student model
 student_metrics = print_model_report(f"{model_name}_student", student_model, test_loader, scalers, device=device)
 
-# Compare original and student models
-print("\n===== Knowledge Distillation Results =====")
-print(f"{'Model':<30}{'Size (MB)':<12}{'Latency(ms)':<15}{'MAE':<10}")
-print('-'*67)
-print(f"{'Original Model':<30}{original_metrics['size']:<12.2f}{original_metrics['inference_time']*1000:<15.2f}{original_metrics['metrics']['mae']:<10.4f}")
-print(f"{'Student Model':<30}{student_metrics['size']:<12.2f}{student_metrics['inference_time']*1000:<15.2f}{student_metrics['metrics']['mae']:<10.4f}")
+# %% [markdown]
+# ### Training Student Model Without Distillation (From Scratch)
+#
+# Now we'll train the same student model architecture without distillation loss to compare
+# the benefits of knowledge distillation versus regular training.
+
+# %%
+print("\n===== Training Student Model Without Distillation =====")
+
+if is_wandb_enabled():
+    wandb.finish()
+
+# Create a new student model with the same architecture
+student_scratch_model = create_student_model(original_model)
+student_scratch_model = student_scratch_model.to(device)
+
+# Train student model from scratch (without distillation)
+print("\nTraining student model from scratch (without distillation)...")
+
+# Train without distillation (from scratch)
+student_scratch_model, scratch_val_loss = train_with_distillation(
+    teacher_model=original_model,  # Still need teacher model for consistent API
+    student_model=student_scratch_model,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    criterion=None,  # Not used when use_distillation=False
+    epochs=EPOCHS,
+    patience=PATIENCE,
+    debug_mode=DEBUG_MODE,
+    model_name=f"{model_name}_student_scratch",
+    target_scaler=target_scaler,
+    config=CONFIG,
+    use_distillation=False  # Turn off distillation
+)
+
+# Save the trained student model (from scratch)
+student_scratch_path = f"checkpoints/{base_checkpoint_name}_student_scratch.pt"
+save_model(student_scratch_model, student_scratch_path, temporal_features=SELECTED_FEATURES,
+           static_features=STATIC_FEATURES, target_field=TARGET_VARIABLE, config=CONFIG, time_feature_keys=TIME_FEATURES)
+print(f"Saved student model trained from scratch to {student_scratch_path}")
+
+# Evaluate student model trained from scratch
+student_scratch_metrics = print_model_report(f"{model_name}_student_scratch",
+                                          student_scratch_model, test_loader, scalers, device=device)
+
+# Compare all models
+print("\n===== Knowledge Distillation Comparison =====")
+print(f"{'Model':<36}{'Size (MB)':<12}{'Latency(ms)':<15}{'MAE':<10}")
+print('-'*73)
+print(f"{'Original Model (Teacher)':<36}{original_metrics['size']:<12.2f}{original_metrics['inference_time']*1000:<15.2f}{original_metrics['metrics']['mae']:<10.4f}")
+print(f"{'Student Model with Distillation':<36}{student_metrics['size']:<12.2f}{student_metrics['inference_time']*1000:<15.2f}{student_metrics['metrics']['mae']:<10.4f}")
+print(f"{'Student Model from Scratch':<36}{student_scratch_metrics['size']:<12.2f}{student_scratch_metrics['inference_time']*1000:<15.2f}{student_scratch_metrics['metrics']['mae']:<10.4f}")
 
 # Calculate and display improvement percentages
 size_reduction = (original_metrics['size'] - student_metrics['size']) / original_metrics['size'] * 100
 speed_improvement = (original_metrics['inference_time'] - student_metrics['inference_time']) / original_metrics['inference_time'] * 100
-accuracy_change = (original_metrics['metrics']['mae'] - student_metrics['metrics']['mae']) / original_metrics['metrics']['mae'] * 100
+distill_accuracy_change = (original_metrics['metrics']['mae'] - student_metrics['metrics']['mae']) / original_metrics['metrics']['mae'] * 100
+scratch_accuracy_change = (original_metrics['metrics']['mae'] - student_scratch_metrics['metrics']['mae']) / original_metrics['metrics']['mae'] * 100
+distill_vs_scratch = (student_scratch_metrics['metrics']['mae'] - student_metrics['metrics']['mae']) / student_scratch_metrics['metrics']['mae'] * 100
 
 print(f"\nSize reduction: {size_reduction:.2f}%")
 print(f"Inference speed improvement: {speed_improvement:.2f}%")
-print(f"Accuracy change: {accuracy_change:.2f}%")
+print(f"Accuracy change (distillation): {distill_accuracy_change:.2f}%")
+print(f"Accuracy change (from scratch): {scratch_accuracy_change:.2f}%")
+print(f"Distillation vs. From scratch improvement: {distill_vs_scratch:.2f}%")
 
-# Visualize predictions of teacher and student models
-print("\nGenerating predictions visualization for teacher and student models...")
+# Visualize predictions of all models
+print("\nGenerating predictions visualization for all models...")
 viz_fig = plot_predictions_over_time(
-    models=[original_model, student_model],
-    model_names=["Teacher", "Student"],
+    models=[original_model, student_model, student_scratch_model],
+    model_names=["Teacher", "Student (Distilled)", "Student (Scratch)"],
     data_loader=test_loader,
     target_scaler=target_scaler,
     num_samples=72,
@@ -1089,21 +1249,20 @@ plt.show()
 if is_wandb_enabled():
     wandb.finish()
 
-# Add student model to overall comparison
-all_models = [original_metrics, best_pruned_model, student_metrics]
+# Add student model from scratch to overall comparison
+all_models = [original_metrics, best_pruned_model, student_metrics, student_scratch_metrics]
 
 # %% [markdown]
-# ### Compare teacher and student model predictions
+# ### Compare Teacher and Student Models Predictions
 # %%
-# Compare model
+# Compare model performance
 from utils.plot_utils import compare_models
-
 
 # Create a dictionary of model metrics
 model_metrics = {
-    'Original Model': original_metrics['metrics'],
-    'Pruned Model': best_pruned_model['metrics'],
-    'Student Model': student_metrics['metrics']
+    'Teacher': original_metrics['metrics'],
+    'Student (Distilled)': student_metrics['metrics'],
+    'Student (Scratch)': student_scratch_metrics['metrics']
 }
 # Drop the 'y_pred' and 'y_true' keys from the model metrics
 for model in model_metrics:
@@ -1125,36 +1284,16 @@ with open(json_file_path, 'w') as f:
 # Compare model performance on test set
 fig = compare_models(model_metrics, dataset_name='Test')
 
-
 # %% [markdown]
-# ## Summary of Efficiency Improvements
-
+# ### Compare predictions of all models
 # %%
-# Calculate percentage improvements relative to the original model
-def calculate_improvements(models, baseline_idx=0):
-    baseline = models[baseline_idx]
-    improvements = []
 
-    for model in models:
-        size_reduction = (baseline['size'] - model['size']) / baseline['size'] * 100
-        speed_improvement = (baseline['inference_time'] - model['inference_time']) / baseline['inference_time'] * 100
-        accuracy_change = (baseline['test_loss'] - model['test_loss']) / baseline['test_loss'] * 100
-
-        improvements.append({
-            'name': model['name'],
-            'size_reduction': size_reduction,
-            'speed_improvement': speed_improvement,
-            'accuracy_change': accuracy_change  # Negative means worse performance
-        })
-
-    return improvements
-
-improvements = calculate_improvements(all_models)
-
-# Display improvements in a table
-print("=== Efficiency Improvements (% relative to original model) ===")
-print(f"{'Model':<20} {'Size Reduction':<15} {'Speed Improvement':<20} {'Accuracy Change':<15}")
-print("-" * 70)
-
-for imp in improvements:
-    print(f"{imp['name']:<20} {imp['size_reduction']:>6.2f}% {imp['speed_improvement']:>18.2f}% {imp['accuracy_change']:>14.2f}%")
+# Plot time series predictions for all models
+_ = plot_predictions_over_time(
+    models=[original_model, student_model, student_scratch_model],
+    model_names=['Teacher', 'Student (Distilled)', 'Student (Scratch)'],
+    data_loader=test_loader,
+    target_scaler=target_scaler,
+    num_samples=72,
+    start_idx=40
+)
