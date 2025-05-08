@@ -3,10 +3,9 @@
 #
 # This notebook demonstrates exploring and downloading the National Solar Radiation Database (NSRDB) data for our project.
 #
-# The NSRDB data is provided from Amazon Web Services using the HDF Group's Highly Scalable Data Service (HSDS).
-# These slicing methods would also work with the WIND Toolkit data available via HSDS at /nrel/wtk/
-#
 # This notebook is based on: https://github.com/NREL/hsds-examples
+#
+# The NSRDB data is provided from Amazon Web Services using the HDF Group's Highly Scalable Data Service (HSDS).
 #
 # Recommended way to run this is to use GitHub Codespaces.
 #  1. Go to: https://github.com/NREL/hsds-examples

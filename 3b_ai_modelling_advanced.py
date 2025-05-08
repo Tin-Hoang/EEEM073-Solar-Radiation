@@ -11,7 +11,7 @@
 #
 # ## Prerequisites
 #
-# **IMPORTANT**: Before running this notebook, you must first run the `2_data_preprocessing.py` script to prepare the normalized data. This script generates the train, validation, and test datasets needed for model training and evaluation.
+# **IMPORTANT**: Before running this notebook, you must first run the `2_data_preprocessing.ipynb` script to prepare the normalized data. This script generates the train, validation, and test datasets needed for model training and evaluation.
 #
 # ## Workflow Overview
 #

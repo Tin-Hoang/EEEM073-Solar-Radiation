@@ -3,10 +3,21 @@
 #
 # This notebook implements deep learning models to forecast Global Horizontal Irradiance (GHI) based on various input features. The notebook is structured as follows:
 #
-# 1. Load raw data (downloaded from the notebook 1_data_exploration_and_download.py)
-# 2. Preprocess the data to create time features, nighttime mask, clear sky GHI baseline and normalize the data
-# 3. Save the normalized data and the scalers for later steps
-
+# 1. Load raw data (downloaded from the notebook 1_data_exploration_and_download.ipynb)
+# 2. Select the features to be used for the modeling
+# 3. Preprocess the data to create time features, nighttime mask, clear sky GHI baseline and normalize the data
+# 4. Save the normalized data and the scalers for later steps
+#
+# For this project, we will split train/val/test data based on the year of the data.
+# - Train: 2011-2018
+# - Val: 2019
+# - Test: 2020
+#
+# The output data will be saved in the `data/processed/` directory:
+# - `train_normalized_<timestamp>.h5`: Normalized training data
+# - `val_normalized_<timestamp>.h5`: Normalized validation data
+# - `test_normalized_<timestamp>.h5`: Normalized test data
+# - `scalers_<timestamp>.pkl`: Scalers used for normalization
 
 # %% [markdown]
 # ## 1. Setup and Data Loading
