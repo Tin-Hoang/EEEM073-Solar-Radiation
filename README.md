@@ -17,6 +17,7 @@ You can get the experiment runs from below Weights & Biases project:
 - `plots/`: Visualization outputs will be saved here.
 - `explainability/`: Outputs of model explainability will be saved here.
 - `checkpoints/`: Saved model checkpoints during training will be saved here.
+- `scripts/`: Python scripts for each corresponding notebook folder to run without Jupyter notebooks.
 
 ## 1. Installation
 
@@ -160,7 +161,7 @@ This project is organized as a series of Jupyter notebooks that guide you throug
 
 ## 4. Alternative: Python Scripts (for running without Jupyter notebooks)
 
-We also provide the Python scripts for each notebook. Each notebook has a corresponding `.py` file with the same name that contains identical code.
+We also provide the Python scripts for each notebook in `scripts/` folder. Each notebook has a corresponding `.py` file with the same name that contains identical code.
 These Python scripts allow you to run the workflow without using Jupyter notebooks:
 
 - `1_data_exploration_and_download.py`
@@ -169,3 +170,8 @@ These Python scripts allow you to run the workflow without using Jupyter noteboo
 - `3b_ai_modelling_advanced.py`
 - `4_explainability.py`
 - `5_model_compression.py`
+
+To run the Python scripts, you can use the following command:
+```
+python scripts/<script_name>.py
+```
