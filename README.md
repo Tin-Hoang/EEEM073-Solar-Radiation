@@ -25,16 +25,43 @@ See `requirements.txt` for the list of dependencies.
 
 Recommended Python version: >= 3.10
 
+This codebase was developed and tested on below specifications (Surrey Otter lab machine):
+```
+- Operating System: Ubuntu 22.04.2 LTS
+- Kernel: Linux 5.15.0-113-generic
+- Python: 3.11.11
+- NVIDIA GPU: NVIDIA RTX A4000 (16GB)
+- CPU: 13th Gen Intel(R) Core(TM) i9-13900 (24 cores, 32 threads)
+```
+
 Install the dependencies by running:
+
+### Option 1: Install all dependencies (required NVIDIA GPU)
+
+This requires NVIDIA GPU.
 ```
 pip install -r requirements.txt
+
 ```
 
-## 2. Download the data
+### Option 2: Install dependencies for CPU only
 
-Follow the instructions in `1_data_exploration_and_download.ipynb` to download the raw data, and the `2_data_preprocessing.ipynb` to preprocess the data.
+This does not require NVIDIA GPU.
+However, the training and inference speed is significantly slower, and you can not run model compression techniques with ONNX GPU runtime on FP16 in notebook `5_model_compression.ipynb`.
+```
+pip install -r requirements_cpu.txt
+```
 
-Or, you can download the NSRDB Himawari 7 data at Ho Chi Minh City for 10 years (2011-2020) from the following links:
+
+## 2. Get the data
+
+### Option 1: Download the data from NSRDB by yourself
+Follow the instructions in `1_data_exploration_and_download.ipynb` to filter and download the raw data from NSRDB.
+
+Then, run `2_data_preprocessing.ipynb` to preprocess the data for modelling.
+
+### Option 2: Download the filtered and preprocessed data
+OR, you can conveniently download the NSRDB Himawari 7 data for Ho Chi Minh City in 10 years (2011-2020) by the following Google Drive links:
 - Raw data: https://drive.google.com/file/d/1U1RQHxjY50E8aTbF6RBiP08I-kvS6RSN/view?usp=sharing
 - Processed data: https://drive.google.com/file/d/1Wjyt_oK4q9au4g6QtTcaxZ3734i5U953/view?usp=sharing
 

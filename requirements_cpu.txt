@@ -20,4 +20,3 @@ jupyterlab==4.2.2
 onnx==1.17.0
 onnxconverter_common==1.14.0
 onnxruntime==1.21.1
-onnxruntime_gpu==1.21.1
