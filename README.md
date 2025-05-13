@@ -67,6 +67,11 @@ OR, you can conveniently download the NSRDB Himawari 7 data for Ho Chi Minh City
 
 ## 3. Notebook Files
 
+To start the JupyterLab server, run:
+```
+jupyter lab
+```
+
 This project is organized as a series of Jupyter notebooks that guide you through the entire workflow:
 
 ### 1. Data Exploration and Download (`1_data_exploration_and_download.ipynb`)
@@ -189,7 +194,7 @@ This project is organized as a series of Jupyter notebooks that guide you throug
 ## 4. Alternative: Python Scripts (for running without Jupyter notebooks)
 
 We also provide the Python scripts for each notebook in `scripts/` folder. Each notebook has a corresponding `.py` file with the same name that contains identical code.
-These Python scripts allow you to run the workflow without using Jupyter notebooks:
+These Python scripts allow you to conveniently run the workflow without using Jupyter notebooks:
 
 - `1_data_exploration_and_download.py`
 - `2_data_preprocessing.py`
