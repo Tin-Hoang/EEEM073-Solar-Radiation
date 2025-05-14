@@ -1,8 +1,11 @@
 # %% [markdown]
-# # GHI Forecasting using PyTorch Models
+# # Data Preprocessing
+# This notebook implements the data preprocessing steps.
 #
-# This notebook implements deep learning models to forecast Global Horizontal Irradiance (GHI) based on various input features. The notebook is structured as follows:
+# Prerequisites:
+# - Run the `notebook 1_data_exploration_and_download.ipynb` to get the data
 #
+# The notebook is structured as follows:
 # 1. Load raw data (downloaded from the notebook 1_data_exploration_and_download.ipynb)
 # 2. Select the features to be used for the modeling
 # 3. Preprocess the data to create time features, nighttime mask, clear sky GHI baseline and normalize the data
