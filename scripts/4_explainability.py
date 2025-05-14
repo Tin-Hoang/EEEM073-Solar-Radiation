@@ -719,18 +719,7 @@ shap_values_high = shap_values_for_viz[high_idx]
 feature_names_for_plot = feature_names_flat
 
 # Prepare expected values (base value)
-if hasattr(explainer.explainer, 'expected_value'):
-    expected_value = explainer.explainer.expected_value
-    if isinstance(expected_value, list):
-        expected_value = expected_value[0]  # Take first output if multi-output
-elif hasattr(explainer.explainer, 'data'):
-    # Fall back to mean of background predictions if expected_value not available
-    with torch.no_grad():
-        background_preds = custom_model_wrapper(X_combined_bg)
-        expected_value = np.mean(background_preds)
-else:
-    # Default fallback
-    expected_value = 0
+expected_value = explainer.get_expected_value(background_data=X_combined_bg)
 
 print(f"Base value for waterfall plot: {expected_value}")
 

@@ -325,6 +325,27 @@ class ShapExplainer(BaseExplainer):
 
         return shap_values
 
+    def get_expected_value(self, background_data=None):
+        """
+        Return the expected value (base value) for SHAP plots.
+        If not available from the explainer, compute it manually using the model and background data.
+        """
+        # Try to get from SHAP explainer
+        if self.explainer is not None and hasattr(self.explainer, "expected_value"):
+            expected_value = self.explainer.expected_value
+            if isinstance(expected_value, (list, np.ndarray)) and len(expected_value) == 1:
+                return expected_value[0]
+            return expected_value
+        # Manual fallback: compute mean prediction on background data
+        if background_data is not None:
+            if self.custom_model_wrapper is not None:
+                preds = self.custom_model_wrapper(background_data)
+            else:
+                preds = self.model(torch.tensor(background_data, dtype=torch.float32).to(self.device)).cpu().numpy()
+            return np.mean(preds)
+        # If all else fails
+        return 0
+
     def plot_feature_importance(self, shap_values: np.ndarray, feature_names: List[str],
                                 max_display: int = 20, show: bool = True, title: str = "Feature Importance") -> plt.Figure:
         """Plot feature importance based on mean absolute SHAP values.
