@@ -1,4 +1,4 @@
-# EEEM073-Solar-Radiation
+# Global Horizontal Irradiance Forecasting
 
 A project for forecasting Global Horizontal Irradiance (GHI) using deep learning models based on the National Solar Radiation Database (NSRDB) data.
 
