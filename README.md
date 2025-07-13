@@ -1,11 +1,34 @@
 # Global Horizontal Irradiance Forecasting
 
-A project for forecasting Global Horizontal Irradiance (GHI) using deep learning models based on the National Solar Radiation Database (NSRDB) data.
+
+***Abstract:** This research aims to develop an accurate and efficient deep learning approach for forecasting Global Horizontal Irradiance (GHI) to facilitate better integration of solar energy into existing power grids. The models leverage satellite data from the National Solar Radiation Database (NSRDB) to predict short-term solar irradiance patterns, enabling more reliable renewable energy planning and management. The study demonstrates how advanced AI techniques can address critical challenges in sustainable energy deployment while maintaining computational efficiency.*
+
+Available models:
+1. LSTM
+2. 1D-CNN
+3. CNN-LSTM
+4. MLP
+5. [TCN](https://arxiv.org/abs/1803.01271)
+6. [Transformer](https://arxiv.org/abs/1706.03762)
+7. [Informer](https://arxiv.org/abs/2012.07436)
+8. [TSMixer](https://arxiv.org/abs/2303.06053)
+9. [iTransformer](https://arxiv.org/abs/2310.06625)
+10. [Mamba](https://arxiv.org/abs/2312.00752)
+
+Supported exploration techniques:
+1. Model Explainability: SHAP, Sensitivity Analysis
+2. Model Compression: Quantization, Pruning, Knowledge Distillation
+
+<p align="center">
+  <img src="docs/advanced_models_results.png" alt="Advanced Models Comparison"/>
+</p>
+<p align="center">
+Comparison of advanced models in terms of RMSE, MAE, R², MASE, and inference throughput.
+</p>
 
 You can get the experiment runs from below Weights & Biases project:
-
-- Author: Tin Hoang
 - Weight & Biases: https://wandb.ai/tin-hoang/EEEM073-Solar-Radiation
+
 
 ## 0. Project Structure
 
@@ -91,6 +114,14 @@ This project is organized as a series of Jupyter notebooks that guide you throug
     - Console output of data exploration steps.
     - Plots visualizing GHI data (displayed in the notebook).
 
+<p align="center">
+  <img src="docs/vietnam_ghi_map.png" alt="Vietnam GHI Map visualization" width="256"/>
+</p>
+<p align="center">
+GHI map of Vietnam at specific time.
+</p>
+
+
 ### 2. Data Preprocessing (`2_data_preprocessing.ipynb`)
 - **Objective**: Load raw data, perform feature engineering, normalization, and split into train/validation/test sets.
 - **Inputs**:
@@ -112,6 +143,13 @@ This project is organized as a series of Jupyter notebooks that guide you throug
         - `test_normalized_<timestamp>.h5`
     - Scaler objects used for normalization, saved as a pickle file in `data/processed/` (e.g., `scalers_<timestamp>.pkl`).
     - Plots visualizing raw data and engineered features (displayed in the notebook).
+
+<p align="center">
+  <img src="docs/day_night_masks.png" alt="Daytime GHI Map" width="400"/>
+</p>
+<p align="center">
+Supported Daytime and Nighttime masks, crucial for the GHI evaluation.
+</p>
 
 ### 3. AI Modeling - Basic Approach (`3a_ai_modelling_basic.ipynb`)
 - **Objective**: Implement, train, and evaluate several foundational deep learning models for GHI forecasting.
@@ -164,6 +202,22 @@ This project is organized as a series of Jupyter notebooks that guide you throug
     - SHAP visualization plots saved to the `explainability/` directory (e.g., summary, waterfall, temporal importance plots).
     - Sensitivity analysis bar chart and a CSV file with sensitivity scores saved to `explainability/`.
     - Console output and plots displayed in the notebook.
+
+
+<p align="center">
+  <img src="docs/shap_summary_plot.png" alt="SHAP Summary Plot" width="400"/>
+</p>
+<p align="center">
+SHAP summary plot for a Mamba model.
+</p>
+
+<p align="center">
+  <img src="docs/shap_temporal_analysis.png" alt="SHAP Temporal Analysis Plot"/>
+</p>
+<p align="center">
+SHAP temporal analysis plot for a Mamba model.
+</p>
+
 
 ### 6. Model Compression (`5_model_compression.ipynb`)
 - **Objective**: Apply and evaluate model compression techniques (Quantization, Pruning, Knowledge Distillation) to reduce model size and potentially improve inference speed.
